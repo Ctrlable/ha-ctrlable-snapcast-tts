@@ -42,7 +42,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.7"  # keep in sync with config.yaml
+VERSION = "0.1.8"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
