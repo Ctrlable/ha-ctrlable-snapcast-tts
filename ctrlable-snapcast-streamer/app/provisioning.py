@@ -66,13 +66,16 @@ def _parse_stream_name_from_uri(uri: str) -> str | None:
 
 async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
     """
-    Link enabled clients to their announcement streams using two strategies:
+    Link enabled clients to their per-client announcement streams and groups.
 
-    1. Adopt: client's current group is already bound to a TCP stream → use it.
-       This handles pre-existing announcement Snapcast setups.
+    Strategy:
+    1. Named: find the stream named ann_<normalized_client_id> and the group
+       bound to it.  That group becomes announce_group_id.  The client's
+       current group (if different) becomes home_group_id so the streamer can
+       move the client away during an announcement and restore it after.
 
-    2. Bind: a stream matching our name/port exists but the group isn't bound
-       to it yet → call Group.SetStream to wire it up.
+    2. Fallback: no named stream found → adopt the current group's TCP stream
+       (legacy single-stream setups).
 
     Returns {client_id: status_message} for all enabled clients.
     """
@@ -82,17 +85,18 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
     snap_clients = await snap.list_clients()
 
     stream_by_id = {s.id: s for s in streams}
-    port_to_sid: dict[int, str] = {}
     name_to_sid: dict[str, str] = {}
     for s in streams:
-        p = _parse_tcp_port(s.uri)
-        if p:
-            port_to_sid[p] = s.id
         n = _parse_stream_name_from_uri(s.uri)
         if n:
             name_to_sid[n] = s.id
 
     client_to_group: dict[str, str] = {c.id: c.current_group_id for c in snap_clients}
+    # Reverse map: first group bound to each stream_id wins
+    stream_to_group_id: dict[str, str] = {}
+    for g in groups:
+        if g.stream_id and g.stream_id not in stream_to_group_id:
+            stream_to_group_id[g.stream_id] = g.id
     group_by_id = {g.id: g for g in groups}
 
     results: dict[str, str] = {}
@@ -102,49 +106,87 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
         if not cs.enabled:
             continue
 
-        cur_gid = client_to_group.get(client_id)
-        cur_group = group_by_id.get(cur_gid or "")
-
-        # ── Strategy 1: adopt existing TCP stream ────────────────
-        # If the client's current group is already bound to a TCP stream,
-        # use that stream and port directly (no config changes needed).
-        if cur_group and cur_group.stream_id:
-            existing = stream_by_id.get(cur_group.stream_id)
-            if existing:
-                port = _parse_tcp_port(existing.uri)
-                if port:
-                    cs.announce_group_id = cur_gid or ""
-                    cs.announce_port = port
-                    if not cs.home_group_id:
-                        cs.home_group_id = cur_gid or ""
-                        cs.home_group_autodetected = True
-                    results[client_id] = f"linked (adopted existing TCP stream on port {port})"
-                    _LOGGER.info("scan: %r adopted stream %r port %d", client_id, existing.id, port)
-                    changed = True
-                    continue
-
-        # ── Strategy 2: bind group to our named/ported stream ────
-        # A stream matching our allocation exists; rebind the group to it.
+        cur_gid = client_to_group.get(client_id, "")
         expected_name = stream_name(client_id)
-        our_sid = name_to_sid.get(expected_name) or (
-            port_to_sid.get(cs.announce_port) if cs.announce_port else None
-        )
-        if our_sid and cur_gid:
-            try:
-                await snap.set_group_stream(cur_gid, our_sid)
-                cs.announce_group_id = cur_gid
-                if not cs.home_group_id:
+        announce_sid = name_to_sid.get(expected_name)
+
+        # ── Strategy 1: named per-client stream ──────────────────
+        if announce_sid:
+            announce_stream = stream_by_id[announce_sid]
+            port = _parse_tcp_port(announce_stream.uri)
+            if not port:
+                results[client_id] = f"stream '{announce_sid}' has no parseable TCP port"
+                continue
+
+            announce_gid = stream_to_group_id.get(announce_sid)
+
+            if announce_gid:
+                cs.announce_group_id = announce_gid
+                cs.announce_port = port
+                if cur_gid and cur_gid != announce_gid:
+                    # Client is currently in a different (home) group — switching will occur.
                     cs.home_group_id = cur_gid
                     cs.home_group_autodetected = True
-                results[client_id] = f"linked (bound group to stream '{our_sid}')"
-                _LOGGER.info("scan: %r bound group %r to stream %r", client_id, cur_gid, our_sid)
+                    status = f"linked (port {port}, home≠announce — group switching enabled)"
+                else:
+                    # Client already sits in its announce group; no move needed.
+                    cs.home_group_id = announce_gid
+                    cs.home_group_autodetected = True
+                    status = f"linked (port {port}, client already in announce group)"
+                results[client_id] = status
+                _LOGGER.info("scan: %r %s", client_id, status)
                 changed = True
                 continue
-            except Exception as exc:
-                _LOGGER.warning("scan: failed to bind group for %r — %s", client_id, exc)
+
+            # Named stream exists but no group is bound to it yet.
+            # Bind the current group only when it is not shared with other enabled clients.
+            if cur_gid:
+                cur_group = group_by_id.get(cur_gid)
+                shared_with = [
+                    cid for cid in (cur_group.client_ids if cur_group else [])
+                    if cid != client_id and state.clients.get(cid, ClientState()).enabled
+                ]
+                if not shared_with:
+                    try:
+                        await snap.set_group_stream(cur_gid, announce_sid)
+                        cs.announce_group_id = cur_gid
+                        cs.announce_port = port
+                        if not cs.home_group_id:
+                            cs.home_group_id = cur_gid
+                            cs.home_group_autodetected = True
+                        results[client_id] = f"linked (bound group to stream '{announce_sid}', port {port})"
+                        _LOGGER.info("scan: %r bound group %r to stream %r", client_id, cur_gid, announce_sid)
+                        changed = True
+                        continue
+                    except Exception as exc:
+                        _LOGGER.warning("scan: %r failed to bind group — %s", client_id, exc)
+
+            results[client_id] = (
+                f"stream '{announce_sid}' found (port {port}) but no group is bound to it — "
+                "ensure snapserver.conf has the stream, reload Snapcast, then re-scan"
+            )
+            continue
+
+        # ── Strategy 2: fallback — adopt current group's TCP stream ──────────
+        if cur_gid:
+            cur_group = group_by_id.get(cur_gid)
+            if cur_group and cur_group.stream_id:
+                existing = stream_by_id.get(cur_group.stream_id)
+                if existing:
+                    port = _parse_tcp_port(existing.uri)
+                    if port:
+                        cs.announce_group_id = cur_gid
+                        cs.announce_port = port
+                        if not cs.home_group_id:
+                            cs.home_group_id = cur_gid
+                            cs.home_group_autodetected = True
+                        results[client_id] = f"linked (adopted current group TCP stream, port {port})"
+                        _LOGGER.info("scan: %r adopted current group port %d", client_id, port)
+                        changed = True
+                        continue
 
         results[client_id] = (
-            f"no TCP stream found on port {cs.announce_port} — "
+            f"no stream named '{expected_name}' found — "
             "add snippet to snapserver.conf and reload Snapcast"
         )
 
