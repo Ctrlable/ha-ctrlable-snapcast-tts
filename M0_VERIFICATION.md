@@ -200,9 +200,9 @@ The new add-on replaces this with per-client streams, routing via satellite mapp
 |---|---------|--------|----------------|
 | 1 | TTS URLs are MP3 (not WAV), always via ffmpeg | Architecture | Drop PCM passthrough from M1 scope; implement ffmpeg-only path first. Add PCM detection/passthrough in M2 as optimization. |
 | 2 | TLS cert is for external domain; add-on must use `verify=False` | Code | `httpx.AsyncClient(verify=False)` for TTS URL fetches; `ffmpeg -tls_verify 0` |
-| 3 | Dual snapserver instances with separate RPC ports | Config schema | Add `snapcast_announcement_rpc_port: 1715` to add-on config. Main server port (1705) still needed for client discovery. |
+| 3 | Add-on targets the announcement Snapcast server only | Config schema | Single `snapcast_rpc_port` pointing at the announcement server. Music server ducking is external to the add-on. No dual-server config needed. *(Supersedes earlier dual-RPC finding.)* |
 | 4 | `Stream.AddStream` confirmed in v0.35.0 | Architecture | RPC-mode stream creation is the primary mode for M1/M2. File-edit mode is secondary (for persistence). |
-| 5 | `announce_port_base` default 4963 is already in use | Config | Change default to `5200` or higher to avoid conflict with existing `Annoucements` stream at 4963. |
+| 5 | `announce_port_base` default 4963 is already in use | Config | Default is `5200` to avoid conflict with existing shared `Annoucements` stream at 4963. |
 | 6 | `systemctl reload` not supported; must use `restart` | Code | provisioning.py: always use `restart`, never `reload` |
 | 7 | 8 announcement clients already connected and named | M1 testing | M1 client discovery will work immediately. Use existing announcement client IDs for integration testing. |
 
@@ -210,11 +210,11 @@ The new add-on replaces this with per-client streams, routing via satellite mapp
 
 ## Summary
 
-All four M0 items are verified. The architecture as specified in SPEC.md is sound. The primary amendments to the spec suggested by M0 findings:
+All four M0 items are verified. The architecture as specified in SPEC.md is sound. The confirmed amendments for M1:
 
-1. **Dual-RPC target** — the add-on must know both the main server RPC port (1705) and the announcement server RPC port (1715). Update `config.yaml` schema to add `snapcast_announcement_rpc_port`.
+1. **Single-server target** — the add-on connects to one Snapcast server (the announcement-dedicated instance). Music server and volume ducking are outside the add-on's scope. Config has one `snapcast_rpc_port`.
 2. **ffmpeg-first for M1** — skip PCM passthrough in M1 since TTS URLs are always MP3. Simplifies M1 scope significantly.
 3. **TLS disabled** — TTS URL fetching always uses `verify=False`.
-4. **Default port** — change `announce_port_base` default from 4963 to 5200.
+4. **Default port** — `announce_port_base` default is 5200 (avoids existing shared stream at 4963).
 
 No blockers. Ready to proceed to M1 on your acceptance.

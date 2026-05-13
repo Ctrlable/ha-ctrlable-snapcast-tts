@@ -4,10 +4,7 @@ configuration:
     description: IP address or hostname of your Snapcast server.
   snapcast_rpc_port:
     name: Snapcast RPC Port
-    description: JSON-RPC TCP port on the main Snapcast server (default 1705). Used for client and group discovery.
-  snapcast_announcement_rpc_port:
-    name: Announcement Server RPC Port
-    description: JSON-RPC TCP port on the announcement Snapcast instance (default 1715). Used for managing announcement streams.
+    description: JSON-RPC TCP port on your Snapcast server (default 1705).
   announce_port_base:
     name: Announcement Port Base
     description: First TCP port used for announcement streams. Each enabled client uses one port starting from this value.
