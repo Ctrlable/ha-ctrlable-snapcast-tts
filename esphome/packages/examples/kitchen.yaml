@@ -1,0 +1,7 @@
+substitutions:
+  name: ctrlable-kitchen
+  friendly_name: "Ctrlable Kitchen"
+  micro_wake_word_model: okay_nabu
+
+packages:
+  ctrlable_base: !include ../ctrlable_atom_echo_base.yaml

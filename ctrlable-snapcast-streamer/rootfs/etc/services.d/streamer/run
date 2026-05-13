@@ -1,0 +1,14 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+set -e
+
+SNAPCAST_HOST=$(bashio::config 'snapcast_host')
+SNAPCAST_RPC_PORT=$(bashio::config 'snapcast_rpc_port')
+ANNOUNCE_PORT_BASE=$(bashio::config 'announce_port_base')
+CONFIG_MODE=$(bashio::config 'config_mode')
+LOG_LEVEL=$(bashio::config 'log_level')
+
+export SNAPCAST_HOST SNAPCAST_RPC_PORT ANNOUNCE_PORT_BASE CONFIG_MODE LOG_LEVEL
+
+bashio::log.info "Starting Ctrlable Snapcast TTS Streamer..."
+exec python -m uvicorn main:app --host 0.0.0.0 --port 8099

@@ -1,0 +1,11 @@
+{
+  "domain": "ctrlable_snapcast_tts",
+  "name": "Ctrlable Snapcast TTS",
+  "codeowners": ["@ronluna"],
+  "config_flow": true,
+  "documentation": "https://github.com/Ctrlable/ha-ctrlable-snapcast-tts",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Ctrlable/ha-ctrlable-snapcast-tts/issues",
+  "requirements": ["httpx>=0.27"],
+  "version": "0.0.1"
+}

@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Ctrlable Snapcast Streamer",
+        "description": "Enter the add-on URL and bearer token from the add-on's Advanced tab.",
+        "data": {
+          "addon_url": "Add-on URL",
+          "bearer_token": "Bearer Token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the add-on. Check the URL and that the add-on is running.",
+      "invalid_auth": "Invalid bearer token.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "Ctrlable Snapcast TTS is already configured."
+    }
+  }
+}

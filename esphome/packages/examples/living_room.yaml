@@ -1,0 +1,7 @@
+substitutions:
+  name: ctrlable-living-room
+  friendly_name: "Ctrlable Living Room"
+  micro_wake_word_model: okay_nabu
+
+packages:
+  ctrlable_base: !include ../ctrlable_atom_echo_base.yaml

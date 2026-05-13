@@ -1,0 +1,51 @@
+announce:
+  name: Announce
+  description: Stream a TTS URL to the snapclient mapped to a satellite.
+  fields:
+    url:
+      name: TTS URL
+      description: The TTS audio URL to stream.
+      required: true
+      selector:
+        text:
+    satellite_id:
+      name: Satellite identifier
+      description: ESPHome device name of the calling satellite. Used to look up the mapping.
+      required: false
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      description: The wake word that triggered this announcement (if known). Used for wake-word-aware routing.
+      required: false
+      selector:
+        text:
+    target_snapclient_ids:
+      name: Override target snapclient IDs
+      description: Bypass the mapping; announce directly to these clients.
+      required: false
+      selector:
+        text:
+          multiple: true
+
+set_mapping:
+  name: Set Mapping
+  description: Programmatically upsert a satellite → snapclient mapping row.
+  fields:
+    satellite_id:
+      name: Satellite identifier
+      required: true
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      description: Use "*" to match any wake word.
+      required: true
+      selector:
+        text:
+    target_snapclient_ids:
+      name: Target snapclient IDs
+      required: true
+      selector:
+        text:
+          multiple: true

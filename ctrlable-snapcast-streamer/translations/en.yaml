@@ -1,0 +1,16 @@
+configuration:
+  snapcast_host:
+    name: Snapcast Host
+    description: IP address or hostname of your Snapcast server.
+  snapcast_rpc_port:
+    name: Snapcast RPC Port
+    description: JSON-RPC port on the Snapcast server (default 1705).
+  announce_port_base:
+    name: Announcement Port Base
+    description: First TCP port used for announcement streams. Each enabled client uses one port starting from this value.
+  config_mode:
+    name: Config Mode
+    description: "file_edit: add-on auto-updates snapserver.conf via SSH. rpc_only: generates snippet for manual copy."
+  log_level:
+    name: Log Level
+    description: Verbosity of add-on logs.
