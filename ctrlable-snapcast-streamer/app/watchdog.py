@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 
-from .snapcast import SnapcastRPCError, SnapcastTimeoutError, get_client
-from .state import get_state
+from snapcast import SnapcastRPCError, SnapcastTimeoutError, get_client
+from state import get_state
 
 _LOGGER = logging.getLogger(__name__)
 

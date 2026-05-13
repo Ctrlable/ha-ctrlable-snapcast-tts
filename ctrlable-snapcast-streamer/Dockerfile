@@ -9,10 +9,11 @@ RUN apk add --no-cache \
     uvicorn==0.30.6 \
     httpx==0.27.2 \
     structlog==24.4.0 \
-    jinja2==3.1.4
+    jinja2==3.1.4 \
+    python-multipart==0.0.9
 
 COPY app/ /app/
 COPY rootfs/ /
 
-WORKDIR /
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8099"]
+WORKDIR /app
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"]

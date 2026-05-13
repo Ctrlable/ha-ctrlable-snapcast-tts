@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .state import get_state
+from state import get_state
 
 _bearer = HTTPBearer(auto_error=False)
 

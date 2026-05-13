@@ -14,16 +14,16 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .auth import require_auth
-from .snapcast import (
+from auth import require_auth
+from snapcast import (
     SnapcastClient,
     SnapcastRPCError,
     SnapcastTimeoutError,
     get_client,
     init_client,
 )
-from .state import ClientState, ensure_bearer_token, get_state, save_state
-from .watchdog import run_watchdog
+from state import ClientState, ensure_bearer_token, get_state, save_state
+from watchdog import run_watchdog
 
 # ── Logging setup ─────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.2"  # keep in sync with config.yaml
+VERSION = "0.1.3"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
