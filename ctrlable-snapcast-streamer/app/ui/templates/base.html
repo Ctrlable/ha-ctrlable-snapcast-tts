@@ -82,8 +82,7 @@
     {% block content %}{% endblock %}
   </main>
   <script>
-    const REFRESH_PAGES = ['{{ ingress_path }}/ui/clients', '{{ ingress_path }}/ui/activity'];
-    if (REFRESH_PAGES.some(p => location.pathname.startsWith(p))) {
+    if (location.pathname.startsWith('{{ ingress_path }}/ui/activity')) {
       setTimeout(() => location.reload(), 10000);
     }
   </script>

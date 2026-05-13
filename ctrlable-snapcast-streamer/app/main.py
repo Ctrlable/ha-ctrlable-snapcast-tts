@@ -22,7 +22,7 @@ from snapcast import (
     get_client,
     init_client,
 )
-from state import ClientState, ensure_bearer_token, get_state, save_state
+from state import ClientState, allocate_port, ensure_bearer_token, get_state, save_state
 from watchdog import run_watchdog
 
 # ── Logging setup ─────────────────────────────────────────────────
@@ -42,7 +42,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.6"  # keep in sync with config.yaml
+VERSION = "0.1.7"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -289,6 +289,13 @@ async def ui_client_toggle(request: Request, client_id: str = Form(...)):
         state.clients[client_id] = ClientState(name=name)
     cs = state.clients[client_id]
     cs.enabled = not cs.enabled
+    if cs.enabled and cs.announce_port == 0:
+        base = int(os.environ.get("ANNOUNCE_PORT_BASE", "5200"))
+        cs.announce_port = allocate_port(base)
+    elif not cs.enabled and cs.announce_port > 0:
+        if cs.announce_port in state.ports_in_use:
+            state.ports_in_use.remove(cs.announce_port)
+        cs.announce_port = 0
     save_state()
     return RedirectResponse(f"{_ingress_path(request)}/ui/clients", status_code=303)
 
