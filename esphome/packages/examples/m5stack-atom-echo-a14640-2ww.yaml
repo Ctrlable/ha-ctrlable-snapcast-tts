@@ -1,0 +1,11 @@
+# Example: two wake words routing to different rooms
+# okay_nabu  → Living Room snapclient
+# hey_jarvis → Master Bedroom snapclient
+substitutions:
+  name: m5stack-atom-echo-a14640
+  friendly_name: "Living Room Satellite"
+  micro_wake_word_model_1: okay_nabu
+  micro_wake_word_model_2: hey_jarvis
+
+packages:
+  ctrlable_base: !include ../ctrlable_atom_echo_base_2ww.yaml
