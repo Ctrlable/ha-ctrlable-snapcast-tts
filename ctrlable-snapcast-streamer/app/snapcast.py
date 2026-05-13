@@ -88,6 +88,22 @@ class SnapcastClient:
             with contextlib.suppress(Exception):
                 await self._writer.wait_closed()
 
+    async def reconnect(self) -> None:
+        """Re-establish the TCP connection, clearing any pending futures."""
+        _LOGGER.info("Reconnecting to Snapcast at %s:%d…", self._host, self._port)
+        with contextlib.suppress(Exception):
+            if self._writer:
+                self._writer.close()
+        self._connected = False
+        self._pending.clear()
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self._host, self._port),
+            timeout=RPC_TIMEOUT,
+        )
+        self._connected = True
+        asyncio.get_event_loop().create_task(self._read_loop())
+        _LOGGER.info("Snapcast reconnected")
+
     async def _read_loop(self) -> None:
         assert self._reader is not None
         try:
@@ -124,7 +140,7 @@ class SnapcastClient:
 
     async def _call(self, method: str, params: dict | None = None) -> Any:
         if not self._connected:
-            raise SnapcastRPCError(-1, "Not connected")
+            await self.reconnect()
         msg_id = _next_id()
         payload: dict = {"id": msg_id, "jsonrpc": "2.0", "method": method}
         if params:
