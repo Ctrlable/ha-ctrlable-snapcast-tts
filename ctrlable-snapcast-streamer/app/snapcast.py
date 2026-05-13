@@ -230,6 +230,9 @@ class SnapcastClient:
     async def remove_stream(self, stream_id: str) -> None:
         await self._call("Stream.RemoveStream", {"id": stream_id})
 
+    async def set_group_stream(self, group_id: str, stream_id: str) -> None:
+        await self._call("Group.SetStream", {"id": group_id, "stream_id": stream_id})
+
     # ── Event subscription ────────────────────────────────────────
 
     def subscribe_events(self, callback: Any) -> None:

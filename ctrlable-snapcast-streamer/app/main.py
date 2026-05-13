@@ -51,7 +51,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.10"  # keep in sync with config.yaml
+VERSION = "0.1.11"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -391,10 +391,18 @@ async def ui_streams_scan(request: Request):
     try:
         snap = get_client()
         results = await scan_and_link(snap)
+        total = len(results)
         linked = sum(1 for v in results.values() if "linked" in v)
-        missing = sum(1 for v in results.values() if "no TCP stream" in v)
-        msg = f"Scan complete: {linked} linked, {missing} need snapserver.conf entry"
-        t = "ok" if missing == 0 else "warn"
+        missing = total - linked
+        if total == 0:
+            msg = "Scan complete: no enabled clients found — enable clients on the Clients tab first"
+            t = "warn"
+        elif missing == 0:
+            msg = f"Scan complete: all {linked} client(s) linked"
+            t = "ok"
+        else:
+            msg = f"Scan complete: {linked}/{total} linked, {missing} need snapserver.conf entry"
+            t = "warn"
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
         msg = f"Scan failed: {exc}"
         t = "error"

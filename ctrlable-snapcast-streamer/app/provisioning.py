@@ -37,10 +37,18 @@ def get_config_snippet(clients: dict[str, ClientState]) -> str:
 
 
 def _parse_tcp_port(uri: str) -> int | None:
+    """Extract port from a Snapcast TCP stream URI.
+
+    Snapcast stores port in the netloc (tcp://0.0.0.0:5200?...) after
+    parsing the config, even though the config uses tcp://0.0.0.0?port=5200.
+    Check netloc first, then fall back to query string.
+    """
     try:
         parsed = urlparse(uri)
         if parsed.scheme != "tcp":
             return None
+        if parsed.port:
+            return parsed.port
         vals = parse_qs(parsed.query).get("port", [])
         return int(vals[0]) if vals else None
     except Exception:
@@ -58,8 +66,14 @@ def _parse_stream_name_from_uri(uri: str) -> str | None:
 
 async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
     """
-    Scan Snapcast for TCP sources matching enabled clients by name or port.
-    Sets announce_group_id and home_group_id in state for matched clients.
+    Link enabled clients to their announcement streams using two strategies:
+
+    1. Adopt: client's current group is already bound to a TCP stream → use it.
+       This handles pre-existing announcement Snapcast setups.
+
+    2. Bind: a stream matching our name/port exists but the group isn't bound
+       to it yet → call Group.SetStream to wire it up.
+
     Returns {client_id: status_message} for all enabled clients.
     """
     state = get_state()
@@ -67,7 +81,7 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
     groups = await snap.list_groups()
     snap_clients = await snap.list_clients()
 
-    # Index streams by name and by port
+    stream_by_id = {s.id: s for s in streams}
     port_to_sid: dict[int, str] = {}
     name_to_sid: dict[str, str] = {}
     for s in streams:
@@ -78,7 +92,6 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
         if n:
             name_to_sid[n] = s.id
 
-    # Index groups by stream and client lookup
     client_to_group: dict[str, str] = {c.id: c.current_group_id for c in snap_clients}
     group_by_id = {g.id: g for g in groups}
 
@@ -86,38 +99,54 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
     changed = False
 
     for client_id, cs in state.clients.items():
-        if not cs.enabled or not cs.announce_port:
+        if not cs.enabled:
             continue
 
-        # Match stream by canonical name first, then by port
-        expected_name = stream_name(client_id)
-        stream_id = name_to_sid.get(expected_name) or port_to_sid.get(cs.announce_port)
-
-        if not stream_id:
-            results[client_id] = f"no TCP stream on port {cs.announce_port} — add to snapserver.conf"
-            continue
-
-        # Find the group containing our client that is bound to this stream
         cur_gid = client_to_group.get(client_id)
         cur_group = group_by_id.get(cur_gid or "")
 
-        if cur_group and cur_group.stream_id == stream_id:
-            # Client is already in a group bound to the announcement stream
-            cs.announce_group_id = cur_gid or ""
-            if not cs.home_group_id:
-                cs.home_group_id = cur_gid or ""
-                cs.home_group_autodetected = True
-            results[client_id] = f"linked → group {(cur_gid or '')[:8]}…"
-            changed = True
-        else:
-            # Find any group bound to this stream
-            bound = [g for g in groups if g.stream_id == stream_id]
-            if bound:
-                cs.announce_group_id = bound[0].id
-                results[client_id] = f"stream found, linked → group {bound[0].id[:8]}… (client not in it yet)"
+        # ── Strategy 1: adopt existing TCP stream ────────────────
+        # If the client's current group is already bound to a TCP stream,
+        # use that stream and port directly (no config changes needed).
+        if cur_group and cur_group.stream_id:
+            existing = stream_by_id.get(cur_group.stream_id)
+            if existing:
+                port = _parse_tcp_port(existing.uri)
+                if port:
+                    cs.announce_group_id = cur_gid or ""
+                    cs.announce_port = port
+                    if not cs.home_group_id:
+                        cs.home_group_id = cur_gid or ""
+                        cs.home_group_autodetected = True
+                    results[client_id] = f"linked (adopted existing TCP stream on port {port})"
+                    _LOGGER.info("scan: %r adopted stream %r port %d", client_id, existing.id, port)
+                    changed = True
+                    continue
+
+        # ── Strategy 2: bind group to our named/ported stream ────
+        # A stream matching our allocation exists; rebind the group to it.
+        expected_name = stream_name(client_id)
+        our_sid = name_to_sid.get(expected_name) or (
+            port_to_sid.get(cs.announce_port) if cs.announce_port else None
+        )
+        if our_sid and cur_gid:
+            try:
+                await snap.set_group_stream(cur_gid, our_sid)
+                cs.announce_group_id = cur_gid
+                if not cs.home_group_id:
+                    cs.home_group_id = cur_gid
+                    cs.home_group_autodetected = True
+                results[client_id] = f"linked (bound group to stream '{our_sid}')"
+                _LOGGER.info("scan: %r bound group %r to stream %r", client_id, cur_gid, our_sid)
                 changed = True
-            else:
-                results[client_id] = f"stream {stream_id} found but no group is bound to it"
+                continue
+            except Exception as exc:
+                _LOGGER.warning("scan: failed to bind group for %r — %s", client_id, exc)
+
+        results[client_id] = (
+            f"no TCP stream found on port {cs.announce_port} — "
+            "add snippet to snapserver.conf and reload Snapcast"
+        )
 
     if changed:
         save_state()
