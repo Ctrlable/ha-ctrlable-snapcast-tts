@@ -5,9 +5,8 @@ import json
 import logging
 import os
 import secrets
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -1,13 +1,14 @@
 """Ctrlable Snapcast TTS Streamer — FastAPI application."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -52,7 +53,7 @@ def _add_activity(client_id: str, fmt: str, duration: float | None, ok: bool, er
     state = get_state()
     cs = state.clients.get(client_id)
     _activity_log.append({
-        "ts": datetime.now(tz=timezone.utc).strftime("%H:%M:%S"),
+        "ts": datetime.now(tz=UTC).strftime("%H:%M:%S"),
         "client_name": cs.name if cs else client_id,
         "fmt": fmt,
         "duration": duration,
@@ -93,10 +94,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    try:
+    with contextlib.suppress(Exception):
         await get_client().disconnect()
-    except Exception:
-        pass
 
 
 app = FastAPI(title="Ctrlable Snapcast TTS Streamer", version=VERSION, lifespan=lifespan)
@@ -137,7 +136,7 @@ async def api_list_clients() -> list[dict]:
             })
         return result
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/snapcast/groups", dependencies=[Depends(require_auth)])
@@ -147,7 +146,7 @@ async def api_list_groups() -> list[dict]:
         groups = await snap.list_groups()
         return [{"id": g.id, "name": g.name, "stream_id": g.stream_id, "client_ids": g.client_ids} for g in groups]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/status", dependencies=[Depends(require_auth)])

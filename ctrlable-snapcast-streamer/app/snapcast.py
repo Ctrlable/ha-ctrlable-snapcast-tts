@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -84,10 +85,8 @@ class SnapcastClient:
         self._connected = False
         if self._writer:
             self._writer.close()
-            try:
+            with contextlib.suppress(Exception):
                 await self._writer.wait_closed()
-            except Exception:
-                pass
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
@@ -139,9 +138,9 @@ class SnapcastClient:
             await self._writer.drain()
         try:
             return await asyncio.wait_for(fut, timeout=RPC_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError as exc:
             self._pending.pop(msg_id, None)
-            raise SnapcastTimeoutError(f"RPC timeout: {method}")
+            raise SnapcastTimeoutError(f"RPC timeout: {method}") from exc
 
     # ── Topology queries ──────────────────────────────────────────
 
