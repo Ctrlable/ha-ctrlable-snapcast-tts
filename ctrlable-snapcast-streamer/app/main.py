@@ -4,8 +4,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import secrets
+import struct
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -34,13 +36,29 @@ from streamer import (
 )
 from watchdog import run_watchdog
 
-# ── Logging setup ─────────────────────────────────────────────────
+# ── Logging setup (JSON structured) ───────────────────────────────
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        doc: dict = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            doc["exc"] = self.formatException(record.exc_info)
+        return json.dumps(doc)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_JsonFormatter())
+logging.root.handlers.clear()
+logging.root.addHandler(_handler)
+logging.root.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 _LOGGER = logging.getLogger(__name__)
 
 # ── Templates ─────────────────────────────────────────────────────
@@ -51,7 +69,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.12"  # keep in sync with config.yaml
+VERSION = "0.1.14"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -108,6 +126,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ctrlable Snapcast TTS Streamer", version=VERSION, lifespan=lifespan)
+
+
+# ── Test audio tone (no auth — raw s16le 48kHz stereo, 1s 440Hz) ──
+
+@app.get("/test_audio")
+async def get_test_audio():
+    from fastapi.responses import Response
+    sample_rate = 48000
+    buf = bytearray()
+    for i in range(sample_rate):  # 1 second
+        val = int(math.sin(2 * math.pi * 440 * i / sample_rate) * 16000)
+        buf += struct.pack("<hh", val, val)
+    return Response(content=bytes(buf), media_type="audio/pcm")
 
 
 # ── Health endpoint (no auth, used by Supervisor) ─────────────────
@@ -350,6 +381,18 @@ async def ui_client_toggle(request: Request, client_id: str = Form(...)):
             state.ports_in_use.remove(cs.announce_port)
         cs.announce_port = 0
     save_state()
+    return RedirectResponse(f"{_ingress_path(request)}/ui/clients", status_code=303)
+
+
+@app.post("/ui/clients/{client_id}/test", response_class=HTMLResponse)
+async def ui_test_announce(request: Request, client_id: str):
+    """Fire a 1-second 440 Hz test tone to the client's announce port."""
+    test_url = "http://localhost:8099/test_audio"
+    try:
+        result = await announce(client_id, test_url, "_test_")
+        _add_activity(client_id, result.fmt, result.duration, ok=True)
+    except Exception as exc:
+        _add_activity(client_id, "test", None, ok=False, error=str(exc))
     return RedirectResponse(f"{_ingress_path(request)}/ui/clients", status_code=303)
 
 

@@ -18,6 +18,7 @@
         <th>Volume</th>
         <th>Enabled for TTS</th>
         <th>Announce Port</th>
+        <th>Test</th>
       </tr>
     </thead>
     <tbody>
@@ -41,6 +42,14 @@
         </form>
       </td>
       <td class="mono">{% if c.announce_port %}{{ c.announce_port }}{% else %}—{% endif %}</td>
+      <td>
+        <form method="post" action="{{ ingress_path }}/ui/clients/{{ c.id }}/test" style="display:inline">
+          <button type="submit" {% if not c.enabled %}disabled title="Enable client first"{% endif %}
+                  style="padding:2px 10px;cursor:{% if c.enabled %}pointer{% else %}not-allowed{% endif %}">
+            ▶ Test
+          </button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
     </tbody>
