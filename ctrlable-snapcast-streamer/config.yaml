@@ -23,12 +23,14 @@ map:
 options:
   snapcast_host: "10.1.8.9"
   snapcast_rpc_port: 1705
-  announce_port_base: 4963
+  snapcast_announcement_rpc_port: 1715
+  announce_port_base: 5200
   config_mode: "file_edit"
   log_level: "info"
 schema:
   snapcast_host: str
   snapcast_rpc_port: port
+  snapcast_announcement_rpc_port: port
   announce_port_base: port
   config_mode: "list(file_edit|rpc_only)"
   log_level: "list(debug|info|warning|error)"
