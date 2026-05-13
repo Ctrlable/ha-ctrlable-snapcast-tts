@@ -2,7 +2,7 @@
   "name": "Ctrlable Snapcast TTS",
   "content_in_root": false,
   "render_readme": true,
-  "country": ["US"],
-  "homeassistant": "2026.5.0",
-  "zip_release": false
+  "homeassistant": "2024.1.0",
+  "zip_release": true,
+  "filename": "ctrlable_snapcast_tts.zip"
 }

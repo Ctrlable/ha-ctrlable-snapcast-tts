@@ -10,8 +10,9 @@ env:
   IMAGE_NAME: ctrlable/ctrlable-snapcast-streamer
 
 jobs:
+  # ── Build add-on Docker images (one job per arch) ─────────────────────────
   build-and-push:
-    name: Build and push multi-arch image
+    name: Build and push (${{ matrix.arch }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,3 +64,34 @@ jobs:
             org.opencontainers.image.source=https://github.com/Ctrlable/ha-ctrlable-snapcast-tts
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
             org.opencontainers.image.licenses=Apache-2.0
+
+  # ── Create GitHub Release with integration zip (for HACS) ─────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build integration zip
+        run: |
+          cd custom_components/ctrlable_snapcast_tts
+          zip -r ../../ctrlable_snapcast_tts.zip .
+          cd ../..
+          echo "Zip contents:"
+          unzip -l ctrlable_snapcast_tts.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: ctrlable_snapcast_tts.zip
