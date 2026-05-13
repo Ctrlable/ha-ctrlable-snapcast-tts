@@ -384,8 +384,8 @@ async def ui_client_toggle(request: Request, client_id: str = Form(...)):
     return RedirectResponse(f"{_ingress_path(request)}/ui/clients", status_code=303)
 
 
-@app.post("/ui/clients/{client_id}/test", response_class=HTMLResponse)
-async def ui_test_announce(request: Request, client_id: str):
+@app.post("/ui/clients/test", response_class=HTMLResponse)
+async def ui_test_announce(request: Request, client_id: str = Form(...)):
     """Fire a 1-second 440 Hz test tone to the client's announce port."""
     test_url = "http://localhost:8099/test_audio"
     try:
