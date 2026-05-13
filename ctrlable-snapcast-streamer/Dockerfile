@@ -6,10 +6,9 @@ RUN apk add --no-cache \
     openssh-client \
     && pip install --no-cache-dir \
     fastapi==0.115.0 \
-    uvicorn[standard]==0.30.6 \
+    uvicorn==0.30.6 \
     httpx==0.27.2 \
     structlog==24.4.0 \
-    paramiko==3.4.1 \
     jinja2==3.1.4
 
 COPY app/ /app/
