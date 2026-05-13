@@ -32,7 +32,8 @@
       <td class="mono">{{ c.host_ip }}</td>
       <td>{{ c.volume_percent }}%{% if c.muted %} 🔇{% endif %}</td>
       <td>
-        <form method="post" action="{{ ingress_path }}/ui/clients/{{ c.id }}/toggle" style="display:inline">
+        <form method="post" action="{{ ingress_path }}/ui/clients/toggle" style="display:inline">
+          <input type="hidden" name="client_id" value="{{ c.id }}">
           <label class="toggle">
             <input type="checkbox" onchange="this.form.submit()" {% if c.enabled %}checked{% endif %}>
             <span class="slider"></span>

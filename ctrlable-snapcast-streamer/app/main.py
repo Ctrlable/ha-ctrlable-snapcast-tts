@@ -42,7 +42,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.5"  # keep in sync with config.yaml
+VERSION = "0.1.6"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -217,6 +217,7 @@ async def ui_connection_post(
     state.snapcast.rpc_port = snapcast_rpc_port
     save_state()
 
+    ingress = _ingress_path(request)
     if action == "test":
         try:
             test_client = SnapcastClient(snapcast_host, snapcast_rpc_port)
@@ -228,7 +229,7 @@ async def ui_connection_post(
         except Exception as exc:
             msg = f"Connection failed: {exc}"
             t = "error"
-        return RedirectResponse(f"/ui/?msg={msg}&t={t}", status_code=303)
+        return RedirectResponse(f"{ingress}/ui/?msg={msg}&t={t}", status_code=303)
 
     try:
         old = get_client()
@@ -238,10 +239,10 @@ async def ui_connection_post(
     try:
         await init_client(snapcast_host, snapcast_rpc_port)
         _degraded = False
-        return RedirectResponse("/ui/?msg=Settings saved and reconnected&t=ok", status_code=303)
+        return RedirectResponse(f"{ingress}/ui/?msg=Settings saved and reconnected&t=ok", status_code=303)
     except Exception as exc:
         _degraded = True
-        return RedirectResponse(f"/ui/?msg=Saved but reconnect failed: {exc}&t=error", status_code=303)
+        return RedirectResponse(f"{ingress}/ui/?msg=Saved but reconnect failed: {exc}&t=error", status_code=303)
 
 
 @app.get("/ui/clients", response_class=HTMLResponse)
@@ -272,8 +273,8 @@ async def ui_clients(request: Request):
     return templates.TemplateResponse(request, "clients.html", ctx)
 
 
-@app.post("/ui/clients/{client_id}/toggle", response_class=HTMLResponse)
-async def ui_client_toggle(client_id: str):
+@app.post("/ui/clients/toggle", response_class=HTMLResponse)
+async def ui_client_toggle(request: Request, client_id: str = Form(...)):
     state = get_state()
     if client_id not in state.clients:
         name = client_id
@@ -289,7 +290,7 @@ async def ui_client_toggle(client_id: str):
     cs = state.clients[client_id]
     cs.enabled = not cs.enabled
     save_state()
-    return RedirectResponse("/ui/clients", status_code=303)
+    return RedirectResponse(f"{_ingress_path(request)}/ui/clients", status_code=303)
 
 
 @app.get("/ui/activity", response_class=HTMLResponse)
@@ -317,8 +318,8 @@ async def ui_advanced(request: Request):
 
 
 @app.post("/ui/advanced/regenerate_token")
-async def ui_regenerate_token():
+async def ui_regenerate_token(request: Request):
     state = get_state()
     state.auth.bearer_token = secrets.token_urlsafe(32)
     save_state()
-    return RedirectResponse("/ui/advanced", status_code=303)
+    return RedirectResponse(f"{_ingress_path(request)}/ui/advanced", status_code=303)
