@@ -4,20 +4,24 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Annotated
 
-import structlog
-from fastapi import Depends, FastAPI, Form, Request, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 
 from .auth import require_auth
-from .snapcast import SnapcastRPCError, SnapcastTimeoutError, get_client, init_client
-from .state import ClientState, get_state, save_state, ensure_bearer_token
+from .snapcast import (
+    SnapcastClient,
+    SnapcastRPCError,
+    SnapcastTimeoutError,
+    get_client,
+    init_client,
+)
+from .state import ClientState, ensure_bearer_token, get_state, save_state
 from .watchdog import run_watchdog
 
 # ── Logging setup ─────────────────────────────────────────────────
@@ -70,7 +74,6 @@ async def lifespan(app: FastAPI):
     host = os.environ.get("SNAPCAST_HOST", state.snapcast.host) or "10.1.8.9"
     port = int(os.environ.get("SNAPCAST_RPC_PORT", state.snapcast.rpc_port) or 1705)
 
-    # Persist env-provided config to state
     if host:
         state.snapcast.host = host
     if port:
@@ -90,9 +93,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Cleanup
     try:
-        get_client().disconnect()
+        await get_client().disconnect()
     except Exception:
         pass
 
@@ -135,7 +137,6 @@ async def api_list_clients() -> list[dict]:
             })
         return result
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -146,7 +147,6 @@ async def api_list_groups() -> list[dict]:
         groups = await snap.list_groups()
         return [{"id": g.id, "name": g.name, "stream_id": g.stream_id, "client_ids": g.client_ids} for g in groups]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -169,7 +169,6 @@ def _ingress_path(request: Request) -> str:
 
 def _base_ctx(request: Request, active: str) -> dict:
     return {
-        "request": request,
         "active": active,
         "degraded": _degraded,
         "version": VERSION,
@@ -203,7 +202,7 @@ async def ui_connection(request: Request):
         "message": request.query_params.get("msg"),
         "message_type": request.query_params.get("t", "ok"),
     })
-    return templates.TemplateResponse("connection.html", ctx)
+    return templates.TemplateResponse(request, "connection.html", ctx)
 
 
 @app.post("/ui/connection", response_class=HTMLResponse)
@@ -221,8 +220,6 @@ async def ui_connection_post(
 
     if action == "test":
         try:
-            import asyncio
-            from .snapcast import SnapcastClient
             test_client = SnapcastClient(snapcast_host, snapcast_rpc_port)
             await test_client.connect()
             clients = await test_client.list_clients()
@@ -234,7 +231,6 @@ async def ui_connection_post(
             t = "error"
         return RedirectResponse(f"/ui/?msg={msg}&t={t}", status_code=303)
 
-    # Reconnect with new settings
     try:
         old = get_client()
         await old.disconnect()
@@ -274,14 +270,13 @@ async def ui_clients(request: Request):
             pass
     ctx = _base_ctx(request, "clients")
     ctx["clients"] = client_list
-    return templates.TemplateResponse("clients.html", ctx)
+    return templates.TemplateResponse(request, "clients.html", ctx)
 
 
 @app.post("/ui/clients/{client_id}/toggle", response_class=HTMLResponse)
 async def ui_client_toggle(client_id: str):
     state = get_state()
     if client_id not in state.clients:
-        # Pull name from live Snapcast if possible
         name = client_id
         try:
             snap = get_client()
@@ -302,7 +297,7 @@ async def ui_client_toggle(client_id: str):
 async def ui_activity(request: Request):
     ctx = _base_ctx(request, "activity")
     ctx["log"] = list(reversed(_activity_log))
-    return templates.TemplateResponse("activity.html", ctx)
+    return templates.TemplateResponse(request, "activity.html", ctx)
 
 
 @app.get("/ui/advanced", response_class=HTMLResponse)
@@ -319,12 +314,11 @@ async def ui_advanced(request: Request):
         },
         indent=2,
     )
-    return templates.TemplateResponse("advanced.html", ctx)
+    return templates.TemplateResponse(request, "advanced.html", ctx)
 
 
 @app.post("/ui/advanced/regenerate_token")
 async def ui_regenerate_token():
-    import secrets
     state = get_state()
     state.auth.bearer_token = secrets.token_urlsafe(32)
     save_state()
