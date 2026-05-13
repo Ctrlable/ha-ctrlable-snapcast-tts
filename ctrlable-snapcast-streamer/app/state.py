@@ -20,8 +20,9 @@ class ClientState:
     name: str = ""
     enabled: bool = False
     announce_port: int = 0
-    announce_group_id: str = ""
-    home_group_id: str = ""
+    announce_group_id: str = ""   # the Snapcast group the client permanently lives in
+    announce_stream_id: str = ""  # the per-client TCP stream to switch to during announcements
+    home_group_id: str = ""       # kept for backward compat / watchdog legacy; not used for routing
     home_group_autodetected: bool = False
     format_cache: dict[str, str] = field(default_factory=dict)
 

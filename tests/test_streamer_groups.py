@@ -1,4 +1,4 @@
-"""Tests for announce() group snapshot-and-restore behaviour."""
+"""Tests for announce() stream-switch snapshot-and-restore behaviour."""
 import asyncio
 import sys
 import os
@@ -10,7 +10,6 @@ import pytest
 
 # ── Minimal stubs so streamer.py can be imported without the full add-on env ──
 
-# state stub
 state_mod = types.ModuleType("state")
 
 @dataclass
@@ -18,15 +17,16 @@ class ClientState:
     name: str = ""
     enabled: bool = True
     announce_port: int = 5206
-    announce_group_id: str = "announce-group-lr"
-    home_group_id: str = "shared-annoucements-group"
+    announce_group_id: str = "group-lr"
+    announce_stream_id: str = "ann_snapclientannouncement616"
+    home_group_id: str = "group-lr"
     home_group_autodetected: bool = True
     format_cache: dict = field(default_factory=dict)
 
 @dataclass
 class SnapcastConfig:
     host: str = "10.1.8.9"
-    rpc_port: int = 1705
+    rpc_port: int = 1715
 
 @dataclass
 class AppState:
@@ -40,19 +40,17 @@ state_mod.save_state = lambda: None
 state_mod.ClientState = ClientState
 sys.modules["state"] = state_mod
 
-# snapcast stub
 snapcast_mod = types.ModuleType("snapcast")
 
 @dataclass
-class SnapClient:
+class SnapGroup:
     id: str
-    current_group_id: str
+    stream_id: str
 
 _snap_instance = MagicMock()
 snapcast_mod.get_client = lambda: _snap_instance
 sys.modules["snapcast"] = snapcast_mod
 
-# httpx stub
 httpx_mod = types.ModuleType("httpx")
 sys.modules["httpx"] = httpx_mod
 
@@ -61,14 +59,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ctrlable-snapc
 import importlib
 streamer = importlib.import_module("streamer")
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
 CLIENT_ID = "snapclient-announcement-6#16"
-ANNOUNCE_GROUP = "announce-group-lr"
-HOME_GROUP = "shared-annoucements-group"
-AIRPLAY_GROUP = "airplay-group-lr"
-
+GROUP_ID = "group-lr"
+ANNOUNCE_STREAM = "ann_snapclientannouncement616"
+AIRPLAY_STREAM = "airplay-stream"
+MUSIC_STREAM = "Music Assistant - masnapclientannouncement616"
 TTS_URL = "http://ha:8123/tts/test.wav"
 SOURCE_HOST = "ha"
 
@@ -78,8 +75,9 @@ def _make_cs(**kwargs) -> ClientState:
         name="Living Room",
         enabled=True,
         announce_port=5206,
-        announce_group_id=ANNOUNCE_GROUP,
-        home_group_id=HOME_GROUP,
+        announce_group_id=GROUP_ID,
+        announce_stream_id=ANNOUNCE_STREAM,
+        home_group_id=GROUP_ID,
         home_group_autodetected=True,
         format_cache={SOURCE_HOST: "other"},
     )
@@ -92,53 +90,45 @@ def _setup_state(cs: ClientState) -> None:
     _app_state.clients = {CLIENT_ID: cs}
 
 
-def _mock_snap(current_group: str) -> MagicMock:
-    """Return a mock SnapcastClient where the client is in `current_group`."""
+def _mock_snap(current_stream: str) -> MagicMock:
+    """Return a mock SnapcastClient where the group is bound to `current_stream`."""
     snap = MagicMock()
-    snap.list_clients = AsyncMock(return_value=[SnapClient(id=CLIENT_ID, current_group_id=current_group)])
-    snap.move_client_to_group = AsyncMock()
+    snap.list_groups = AsyncMock(return_value=[SnapGroup(id=GROUP_ID, stream_id=current_stream)])
+    snap.set_group_stream = AsyncMock()
     return snap
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_restore_to_live_group_not_home_group():
-    """When client is manually moved to AirPlay, announce restores to AirPlay, not home_group."""
+async def test_switches_stream_when_on_airplay():
+    """When group is on AirPlay, announce switches to announce stream and restores."""
     cs = _make_cs()
     _setup_state(cs)
-    snap = _mock_snap(current_group=AIRPLAY_GROUP)
+    snap = _mock_snap(current_stream=AIRPLAY_STREAM)
 
     with (
-        patch.object(snapcast_mod, "get_client", return_value=snap),
         patch.object(streamer, "get_snap", return_value=snap),
         patch.object(streamer, "_stream_ffmpeg", new=AsyncMock()),
         patch.object(streamer, "asyncio") as mock_asyncio,
     ):
         mock_asyncio.sleep = AsyncMock()
         mock_asyncio.Lock = asyncio.Lock
-        mock_asyncio.gather = asyncio.gather
-        mock_asyncio.open_connection = AsyncMock()
         streamer._locks = {}
-
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
-    calls = snap.move_client_to_group.call_args_list
-    assert len(calls) == 2
-    # First call: move to announce group
-    assert calls[0].args == (CLIENT_ID, ANNOUNCE_GROUP)
-    # Second call (restore): must go back to AIRPLAY_GROUP, NOT home_group
-    assert calls[1].args == (CLIENT_ID, AIRPLAY_GROUP), (
-        f"Expected restore to AirPlay group {AIRPLAY_GROUP!r}, got {calls[1].args[1]!r}"
-    )
+    calls = snap.set_group_stream.call_args_list
+    assert len(calls) == 2, f"Expected 2 set_group_stream calls, got {len(calls)}"
+    assert calls[0].args == (GROUP_ID, ANNOUNCE_STREAM), "Should switch to announce stream"
+    assert calls[1].args == (GROUP_ID, AIRPLAY_STREAM), "Should restore to AirPlay"
 
 
 @pytest.mark.asyncio
-async def test_no_group_switch_when_already_in_announce_group():
-    """Client already in announce group → no move, just stream."""
+async def test_switches_stream_when_on_music_assistant():
+    """When group is on Music Assistant, announce switches and restores."""
     cs = _make_cs()
     _setup_state(cs)
-    snap = _mock_snap(current_group=ANNOUNCE_GROUP)
+    snap = _mock_snap(current_stream=MUSIC_STREAM)
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
@@ -148,18 +138,19 @@ async def test_no_group_switch_when_already_in_announce_group():
         mock_asyncio.sleep = AsyncMock()
         mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
-
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
-    snap.move_client_to_group.assert_not_called()
+    calls = snap.set_group_stream.call_args_list
+    assert calls[0].args == (GROUP_ID, ANNOUNCE_STREAM)
+    assert calls[1].args == (GROUP_ID, MUSIC_STREAM)
 
 
 @pytest.mark.asyncio
-async def test_restore_to_home_group_normal_case():
-    """Standard case: client in home group → moves to announce → restores to home."""
+async def test_no_stream_switch_when_already_on_announce_stream():
+    """When group is already on the announce stream, no switching needed."""
     cs = _make_cs()
     _setup_state(cs)
-    snap = _mock_snap(current_group=HOME_GROUP)
+    snap = _mock_snap(current_stream=ANNOUNCE_STREAM)
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
@@ -169,20 +160,17 @@ async def test_restore_to_home_group_normal_case():
         mock_asyncio.sleep = AsyncMock()
         mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
-
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
-    calls = snap.move_client_to_group.call_args_list
-    assert calls[0].args == (CLIENT_ID, ANNOUNCE_GROUP)
-    assert calls[1].args == (CLIENT_ID, HOME_GROUP)
+    snap.set_group_stream.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_restore_happens_on_stream_error():
-    """Even if streaming raises, the client is restored to its live group."""
+    """Even if streaming raises, the group stream is restored."""
     cs = _make_cs()
     _setup_state(cs)
-    snap = _mock_snap(current_group=HOME_GROUP)
+    snap = _mock_snap(current_stream=AIRPLAY_STREAM)
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
@@ -192,23 +180,19 @@ async def test_restore_happens_on_stream_error():
         mock_asyncio.sleep = AsyncMock()
         mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
-
         with pytest.raises(RuntimeError):
             await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
-    # Even after exception, restore must be called
-    restore_calls = [c for c in snap.move_client_to_group.call_args_list if c.args[1] == HOME_GROUP]
-    assert len(restore_calls) == 1, "Restore must happen even when streaming fails"
+    restore_calls = [c for c in snap.set_group_stream.call_args_list if c.args[1] == AIRPLAY_STREAM]
+    assert len(restore_calls) == 1, "Stream must be restored even when streaming fails"
 
 
 @pytest.mark.asyncio
-async def test_fallback_to_saved_home_when_rpc_fails():
-    """If list_clients fails, fall back to saved home_group_id for restore."""
-    cs = _make_cs()
+async def test_no_switch_when_announce_stream_id_not_configured():
+    """Clients without announce_stream_id (pre-scan) just stream directly."""
+    cs = _make_cs(announce_stream_id="")
     _setup_state(cs)
-    snap = MagicMock()
-    snap.list_clients = AsyncMock(side_effect=Exception("RPC timeout"))
-    snap.move_client_to_group = AsyncMock()
+    snap = _mock_snap(current_stream=AIRPLAY_STREAM)
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
@@ -218,10 +202,6 @@ async def test_fallback_to_saved_home_when_rpc_fails():
         mock_asyncio.sleep = AsyncMock()
         mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
-
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
-    calls = snap.move_client_to_group.call_args_list
-    # Should still move and restore using saved home_group_id as fallback
-    assert calls[0].args == (CLIENT_ID, ANNOUNCE_GROUP)
-    assert calls[1].args == (CLIENT_ID, HOME_GROUP)
+    snap.set_group_stream.assert_not_called()

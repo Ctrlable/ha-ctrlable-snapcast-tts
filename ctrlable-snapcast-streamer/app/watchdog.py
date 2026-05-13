@@ -1,4 +1,4 @@
-"""Startup recovery watchdog — evicts clients from announce groups before HTTP server starts."""
+"""Startup watchdog — verifies Snapcast connectivity and logs stream state."""
 from __future__ import annotations
 
 import logging
@@ -11,46 +11,44 @@ _LOGGER = logging.getLogger(__name__)
 
 async def run_watchdog() -> bool:
     """
-    For every client in state that has an announce_group_id, check if that client
-    is currently sitting in its announce group and move it back to home.
+    Verify Snapcast is reachable on startup and log each enabled client's
+    current stream.  If a client's group is stuck on its announce stream after
+    a mid-announcement crash, the next announce() call will detect the mismatch
+    and restore correctly via its finally block — no active recovery needed here.
 
-    Returns True if all recoveries succeeded (or nothing needed recovery).
-    Returns False if Snapcast was unreachable — caller should set degraded mode.
+    Returns True if Snapcast is reachable, False otherwise (caller sets degraded).
     """
     state = get_state()
     if not state.clients:
-        _LOGGER.info("Watchdog: no clients configured yet, nothing to do")
+        _LOGGER.info("Watchdog: no clients configured yet")
         return True
 
     try:
-        client = get_client()
-        groups = await client.list_groups()
+        snap = get_client()
+        groups = await snap.list_groups()
         group_map = {g.id: g for g in groups}
     except (SnapcastRPCError, SnapcastTimeoutError, RuntimeError) as exc:
         _LOGGER.error("Watchdog: Snapcast unreachable — %s", exc)
         return False
 
-    recovered = 0
-    failed = 0
-
     for client_id, cs in state.clients.items():
-        if not cs.announce_group_id or not cs.home_group_id:
+        if not cs.enabled or not cs.announce_group_id:
             continue
-        ann_group = group_map.get(cs.announce_group_id)
-        if ann_group is None:
+        grp = group_map.get(cs.announce_group_id)
+        if grp is None:
+            _LOGGER.warning(
+                "Watchdog: %r announce_group %r not found in Snapcast — re-scan needed",
+                client_id, cs.announce_group_id,
+            )
             continue
-        if client_id not in ann_group.client_ids:
-            continue
-        # Client is stuck in announce group — move it home
-        try:
-            snap = get_client()
-            await snap.move_client_to_group(client_id, cs.home_group_id)
-            await snap.remove_client_from_group(client_id, cs.announce_group_id)
-            _LOGGER.warning("Watchdog: recovered client %r → home group %r", client_id, cs.home_group_id)
-            recovered += 1
-        except Exception as exc:
-            _LOGGER.error("Watchdog: failed to recover client %r — %s", client_id, exc)
-            failed += 1
+        current_stream = grp.stream_id
+        if cs.announce_stream_id and current_stream != cs.announce_stream_id:
+            _LOGGER.info(
+                "Watchdog: %r group is on %r (not announce stream %r) — will restore on next announce",
+                client_id, current_stream, cs.announce_stream_id,
+            )
+        else:
+            _LOGGER.info("Watchdog: %r OK (stream=%r)", client_id, current_stream)
 
-    _LOGGER.info("Watchdog complete: %d recovered, %d failed", recovered, failed)
-    return failed == 0
+    _LOGGER.info("Watchdog complete")
+    return True

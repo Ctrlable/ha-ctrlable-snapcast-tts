@@ -114,34 +114,29 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
     snap = get_snap()
 
     async with _lock(client_id):
-        # Snapshot the client's live group NOW so we restore to wherever it
-        # actually is — not to the group recorded at last-scan time.  This
-        # handles manual source changes (e.g. switched to AirPlay) between
-        # scans.
-        live_group_id: str = cs.home_group_id  # safe fallback
-        try:
-            snap_clients = await snap.list_clients()
-            match = next((c for c in snap_clients if c.id == client_id), None)
-            if match:
-                live_group_id = match.current_group_id
-        except Exception as exc:
-            _LOGGER.warning(
-                "Could not fetch live group for %r (%s) — will restore to saved home_group",
-                client_id, exc,
-            )
-
-        # Persist home group on first run if still empty
-        if not cs.home_group_id and live_group_id:
-            cs.home_group_id = live_group_id
-            cs.home_group_autodetected = True
-            save_state()
-            _LOGGER.info("Auto-detected home group %r for %r", live_group_id, client_id)
-
-        # Move to announce group only when client is not already there
+        # Each announcement client lives permanently in its own Snapcast group.
+        # When a user switches to AirPlay / Music Assistant / etc., Snapcast
+        # changes the GROUP's stream_id — the client never leaves the group.
+        # So we snapshot the group's current stream, switch it to the
+        # per-client announcement stream, play, then restore.
+        live_stream_id: str = ""
         needs_restore = False
-        if cs.announce_group_id and live_group_id and live_group_id != cs.announce_group_id:
-            await snap.move_client_to_group(client_id, cs.announce_group_id)
-            needs_restore = True
+
+        if cs.announce_group_id and cs.announce_stream_id:
+            try:
+                groups = await snap.list_groups()
+                grp = next((g for g in groups if g.id == cs.announce_group_id), None)
+                if grp:
+                    live_stream_id = grp.stream_id
+                    if live_stream_id != cs.announce_stream_id:
+                        await snap.set_group_stream(cs.announce_group_id, cs.announce_stream_id)
+                        needs_restore = True
+                        _LOGGER.info(
+                            "Switched %r stream %r → %r for announcement",
+                            client_id, live_stream_id, cs.announce_stream_id,
+                        )
+            except Exception as exc:
+                _LOGGER.warning("Could not switch stream for %r: %s — playing anyway", client_id, exc)
 
         try:
             fmt = cs.format_cache.get(source_host)
@@ -162,9 +157,13 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
             _LOGGER.info("Announced to %r: %.2fs via %s", client_id, duration, fmt)
             await asyncio.sleep(_BUFFER_DRAIN)
         finally:
-            if needs_restore and live_group_id:
+            if needs_restore and live_stream_id:
                 with contextlib.suppress(Exception):
-                    await snap.move_client_to_group(client_id, live_group_id)
+                    await snap.set_group_stream(cs.announce_group_id, live_stream_id)
+                    _LOGGER.info(
+                        "Restored %r stream %r → %r",
+                        client_id, cs.announce_stream_id, live_stream_id,
+                    )
 
     return AnnounceResult(client_id=client_id, duration=duration, fmt=fmt)
 
