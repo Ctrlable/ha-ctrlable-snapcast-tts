@@ -15,9 +15,9 @@ panel_icon: mdi:speaker-wireless
 panel_title: Snapcast TTS
 homeassistant_api: true
 ports:
-  8099/tcp: 8099
+  8765/tcp: 8099
 ports_description:
-  8099/tcp: FastAPI HTTP API (bearer token auth; TTS announce and Snapcast control)
+  8765/tcp: FastAPI HTTP API (bearer token auth; TTS announce and Snapcast control)
 map:
   - ssl
   - share
