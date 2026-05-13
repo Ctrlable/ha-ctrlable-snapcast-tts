@@ -10,10 +10,21 @@ class NoMatchingMappingError(Exception):
     pass
 
 
+def _norm(wake_word: str) -> str:
+    """Normalise wake word for comparison.
+
+    ESPHome sends e.g. "okay nabu" (space, lowercase) while users often type
+    "okay_nabu" or "Okay Nabu" in the config UI.  Normalise both sides so
+    they match regardless of case or separator.
+    """
+    return wake_word.lower().replace("_", " ").replace("-", " ").strip()
+
+
 def resolve(mappings: list[dict], satellite_id: str, wake_word: str | None) -> list[str]:
     """Return ordered list of target snapclient IDs for a satellite + wake word.
 
     Prefers wake-word-specific rows over wildcard (*) rows.
+    Wake word comparison is case-insensitive; underscores/hyphens equal spaces.
     Raises SatelliteNotMappedError if satellite has no rows at all.
     Raises NoMatchingMappingError if satellite is known but no row matches.
     """
@@ -22,7 +33,8 @@ def resolve(mappings: list[dict], satellite_id: str, wake_word: str | None) -> l
         raise SatelliteNotMappedError(satellite_id)
 
     if wake_word:
-        specific = [m for m in candidates if m["wake_word"] == wake_word]
+        norm_ww = _norm(wake_word)
+        specific = [m for m in candidates if _norm(m["wake_word"]) == norm_ww]
         if specific:
             return specific[0]["target_snapclient_ids"]
 
