@@ -18,17 +18,21 @@ from homeassistant.helpers.selector import (
 )
 
 from .api import AddonApiClient, CannotConnectError, InvalidAuthError
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DEFAULT_ADDON_URL, DOMAIN
+from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN
 from .mapping import label, remove, upsert
 
 _LOGGER = logging.getLogger(__name__)
 
-_USER_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_ADDON_URL, default=DEFAULT_ADDON_URL): str,
-        vol.Required(CONF_BEARER_TOKEN): str,
-    }
-)
+
+def _default_addon_url(hass) -> str:
+    """Best-guess add-on URL derived from HA's own internal URL."""
+    try:
+        from urllib.parse import urlparse
+        raw = hass.config.internal_url or hass.config.external_url or ""
+        host = urlparse(str(raw)).hostname or "homeassistant.local"
+    except Exception:
+        host = "homeassistant.local"
+    return f"http://{host}:8099"
 
 
 class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -60,9 +64,15 @@ class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):
                     data=user_input,
                 )
 
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADDON_URL, default=_default_addon_url(self.hass)): str,
+                vol.Required(CONF_BEARER_TOKEN): str,
+            }
+        )
         return self.async_show_form(
             step_id="user",
-            data_schema=_USER_SCHEMA,
+            data_schema=schema,
             errors=errors,
         )
 
