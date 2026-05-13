@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+{% if message %}
+<div class="alert {% if message_type == 'error' %}alert-error{% elif message_type == 'ok' %}alert-ok{% else %}alert-warn{% endif %}">
+  {{ message }}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Snapcast Connection</h2>
+  <form method="post" action="/ui/connection">
+    <label>Snapcast Host (announcement server)</label>
+    <input type="text" name="snapcast_host" value="{{ snapcast_host }}" placeholder="10.1.8.9">
+    <label>RPC Port</label>
+    <input type="number" name="snapcast_rpc_port" value="{{ snapcast_rpc_port }}" min="1" max="65535">
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+      <button type="submit" name="action" value="save" class="btn-primary">Save</button>
+      <button type="submit" name="action" value="test" class="btn-secondary">Test Connection</button>
+    </div>
+  </form>
+</div>
+
+{% if snap_status %}
+<div class="card">
+  <h2>Server Status</h2>
+  <table>
+    <tr><th>Property</th><th>Value</th></tr>
+    <tr><td>Version</td><td>{{ snap_status.version }}</td></tr>
+    <tr><td>Connected clients</td><td>{{ snap_status.connected_clients }}</td></tr>
+    <tr><td>Total clients</td><td>{{ snap_status.total_clients }}</td></tr>
+    <tr><td>Streams</td><td>{{ snap_status.streams | join(', ') }}</td></tr>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

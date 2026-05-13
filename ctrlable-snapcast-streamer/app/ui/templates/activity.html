@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Recent Announcements <span style="font-size:11px;color:var(--muted)">(auto-refreshes every 10s)</span></h2>
+  {% if log %}
+  <table>
+    <thead>
+      <tr><th>Time</th><th>Client</th><th>Format</th><th>Duration</th><th>Result</th></tr>
+    </thead>
+    <tbody>
+    {% for entry in log %}
+    <tr>
+      <td class="mono" style="font-size:11px">{{ entry.ts }}</td>
+      <td>{{ entry.client_name }}</td>
+      <td class="mono">{{ entry.fmt }}</td>
+      <td>{% if entry.duration %}{{ "%.2f"|format(entry.duration) }}s{% else %}—{% endif %}</td>
+      <td>
+        {% if entry.ok %}
+        <span style="color:var(--success)">✓</span>
+        {% else %}
+        <span style="color:var(--error)" title="{{ entry.error }}">✗ {{ entry.error[:40] }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No announcements yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

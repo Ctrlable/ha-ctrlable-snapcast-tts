@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Bearer Token</h2>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+    Paste this token into the Ctrlable Snapcast TTS integration when setting up the connection.
+  </p>
+  <div style="display:flex;gap:10px;align-items:center">
+    <input type="password" id="token-field" value="{{ bearer_token }}" readonly style="flex:1;font-family:monospace">
+    <button class="btn-secondary btn-sm" onclick="toggleToken()">Show</button>
+    <button class="btn-secondary btn-sm" onclick="copyToken()">Copy</button>
+  </div>
+  <form method="post" action="/ui/advanced/regenerate_token" style="margin-top:12px">
+    <button type="submit" class="btn-secondary btn-sm"
+            onclick="return confirm('Regenerate token? The integration will need to be updated.')">
+      Regenerate token
+    </button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Raw State</h2>
+  <pre style="font-size:11px;overflow:auto;max-height:400px;color:var(--muted)">{{ state_json }}</pre>
+</div>
+
+<script>
+  function toggleToken() {
+    const f = document.getElementById('token-field');
+    f.type = f.type === 'password' ? 'text' : 'password';
+  }
+  function copyToken() {
+    const f = document.getElementById('token-field');
+    navigator.clipboard.writeText(f.value);
+  }
+</script>
+{% endblock %}

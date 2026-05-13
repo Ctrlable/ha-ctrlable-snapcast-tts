@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+{% if degraded %}
+<div class="alert alert-error">Snapcast unreachable. Resolve connection issues on the Connection tab.</div>
+{% endif %}
+
+<div class="card">
+  <h2>Snapcast Clients</h2>
+  {% if clients %}
+  <table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Name</th>
+        <th>Client ID</th>
+        <th>Group</th>
+        <th>IP</th>
+        <th>Volume</th>
+        <th>Enabled for TTS</th>
+        <th>Announce Port</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in clients %}
+    <tr>
+      <td>
+        <span class="status-dot {% if c.connected %}dot-green{% else %}dot-red{% endif %}"></span>
+      </td>
+      <td>{{ c.name or '(unnamed)' }}</td>
+      <td class="mono">{{ c.id }}</td>
+      <td class="mono" style="font-size:11px">{{ c.current_group_id[:16] }}…</td>
+      <td class="mono">{{ c.host_ip }}</td>
+      <td>{{ c.volume_percent }}%{% if c.muted %} 🔇{% endif %}</td>
+      <td>
+        <form method="post" action="/ui/clients/{{ c.id }}/toggle" style="display:inline">
+          <label class="toggle">
+            <input type="checkbox" onchange="this.form.submit()" {% if c.enabled %}checked{% endif %}>
+            <span class="slider"></span>
+          </label>
+        </form>
+      </td>
+      <td class="mono">{% if c.announce_port %}{{ c.announce_port }}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No clients discovered. Check the Connection tab.</p>
+  {% endif %}
+</div>
+{% endblock %}
