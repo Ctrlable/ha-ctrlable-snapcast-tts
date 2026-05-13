@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+{% if degraded %}
+<div class="alert alert-error">Snapcast unreachable. Resolve on the Connection tab first.</div>
+{% endif %}
+
+<div class="card">
+  <h2>snapserver.conf snippet</h2>
+  <p style="color:var(--muted);font-size:12px;margin-bottom:12px">
+    Add the block below to your Snapcast server config, reload Snapcast, then click <strong>Scan Snapcast</strong>.
+  </p>
+  <pre class="mono" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;font-size:12px;overflow-x:auto;white-space:pre;user-select:all">{{ snippet }}</pre>
+</div>
+
+<div class="card">
+  <h2>Client stream status</h2>
+  {% if message %}
+  <div class="alert alert-{{ message_type }}" style="margin-bottom:16px">{{ message }}</div>
+  {% endif %}
+  <form method="post" action="{{ ingress_path }}/ui/streams/scan" style="margin-bottom:20px">
+    <button type="submit" class="btn-primary" {% if degraded %}disabled{% endif %}>Scan Snapcast</button>
+    <span style="color:var(--muted);font-size:12px;margin-left:10px">
+      Detects existing TCP streams and links them to enabled clients automatically.
+    </span>
+  </form>
+  {% if clients %}
+  <table>
+    <thead>
+      <tr>
+        <th>Client</th>
+        <th>Announce Port</th>
+        <th>Stream Status</th>
+        <th>Announce Group</th>
+        <th>Home Group</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in clients %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td class="mono">{{ c.announce_port or '—' }}</td>
+      <td>
+        {% if c.announce_group_id %}
+        <span style="color:var(--success)">&#10003; Linked</span>
+        {% else %}
+        <span style="color:var(--warn)">Needs config</span>
+        {% endif %}
+      </td>
+      <td class="mono" style="font-size:11px">
+        {% if c.announce_group_id %}{{ c.announce_group_id[:16] }}…{% else %}—{% endif %}
+      </td>
+      <td class="mono" style="font-size:11px">
+        {% if c.home_group_id %}{{ c.home_group_id[:16] }}…{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No clients enabled. Enable clients on the Clients tab first.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>How to apply</h2>
+  <ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:20px">
+    <li>Copy the snippet above into <code>/etc/snapserver.conf</code> on your Snapcast host</li>
+    <li>Reload Snapcast: <code>systemctl reload snapserver</code></li>
+    <li>Click <strong>Scan Snapcast</strong> — the add-on will detect the new streams and link them</li>
+    <li>Once all clients show <span style="color:var(--success)">&#10003; Linked</span>, announcements are ready</li>
+  </ol>
+</div>
+{% endblock %}

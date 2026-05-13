@@ -13,8 +13,10 @@ from datetime import UTC, datetime
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from auth import require_auth
+from provisioning import get_config_snippet, scan_and_link
 from snapcast import (
     SnapcastClient,
     SnapcastRPCError,
@@ -23,6 +25,13 @@ from snapcast import (
     init_client,
 )
 from state import ClientState, allocate_port, ensure_bearer_token, get_state, save_state
+from streamer import (
+    ClientNotEnabledError,
+    ClientNotFoundError,
+    NotProvisionedError,
+    announce,
+    announce_multi,
+)
 from watchdog import run_watchdog
 
 # ── Logging setup ─────────────────────────────────────────────────
@@ -42,7 +51,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.8"  # keep in sync with config.yaml
+VERSION = "0.1.9"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -158,6 +167,50 @@ async def api_status() -> dict:
         "clients": {k: asdict(v) for k, v in state.clients.items()},
         "ports_in_use": state.ports_in_use,
     }
+
+
+# ── Announce API ──────────────────────────────────────────────────
+
+class AnnounceBody(BaseModel):
+    client_id: str
+    url: str
+    source_host: str
+
+
+class AnnounceMultiBody(BaseModel):
+    client_ids: list[str]
+    url: str
+    source_host: str
+
+
+@app.post("/announce", dependencies=[Depends(require_auth)])
+async def api_announce(body: AnnounceBody) -> dict:
+    try:
+        result = await announce(body.client_id, body.url, body.source_host)
+        _add_activity(body.client_id, result.fmt, result.duration, ok=True)
+        return {"duration": round(result.duration, 3), "format": result.fmt}
+    except ClientNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Client not found: {exc}") from exc
+    except ClientNotEnabledError as exc:
+        raise HTTPException(status_code=409, detail=f"Client not enabled: {exc}") from exc
+    except NotProvisionedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SnapcastRPCError, SnapcastTimeoutError) as exc:
+        _add_activity(body.client_id, "", None, ok=False, error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        _add_activity(body.client_id, "", None, ok=False, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/announce/multi", dependencies=[Depends(require_auth)])
+async def api_announce_multi(body: AnnounceMultiBody) -> list[dict]:
+    results = await announce_multi(body.client_ids, body.url, body.source_host)
+    out = []
+    for r in results:
+        _add_activity(r.client_id, r.fmt, r.duration, ok=True)
+        out.append({"client_id": r.client_id, "duration": round(r.duration, 3), "format": r.fmt})
+    return out
 
 
 # ── Ingress UI ────────────────────────────────────────────────────
@@ -305,6 +358,47 @@ async def ui_activity(request: Request):
     ctx = _base_ctx(request, "activity")
     ctx["log"] = list(reversed(_activity_log))
     return templates.TemplateResponse(request, "activity.html", ctx)
+
+
+@app.get("/ui/streams", response_class=HTMLResponse)
+async def ui_streams(request: Request):
+    state = get_state()
+    enabled = {cid: cs for cid, cs in state.clients.items() if cs.enabled}
+    snippet = get_config_snippet(enabled)
+    client_list = [
+        {
+            "id": cid,
+            "name": cs.name or cid,
+            "announce_port": cs.announce_port,
+            "announce_group_id": cs.announce_group_id,
+            "home_group_id": cs.home_group_id,
+        }
+        for cid, cs in enabled.items()
+    ]
+    ctx = _base_ctx(request, "streams")
+    ctx.update({
+        "snippet": snippet,
+        "clients": client_list,
+        "message": request.query_params.get("msg"),
+        "message_type": request.query_params.get("t", "ok"),
+    })
+    return templates.TemplateResponse(request, "streams.html", ctx)
+
+
+@app.post("/ui/streams/scan", response_class=HTMLResponse)
+async def ui_streams_scan(request: Request):
+    ingress = _ingress_path(request)
+    try:
+        snap = get_client()
+        results = await scan_and_link(snap)
+        linked = sum(1 for v in results.values() if "linked" in v)
+        missing = sum(1 for v in results.values() if "no TCP stream" in v)
+        msg = f"Scan complete: {linked} linked, {missing} need snapserver.conf entry"
+        t = "ok" if missing == 0 else "warn"
+    except (SnapcastRPCError, SnapcastTimeoutError) as exc:
+        msg = f"Scan failed: {exc}"
+        t = "error"
+    return RedirectResponse(f"{ingress}/ui/streams?msg={msg}&t={t}", status_code=303)
 
 
 @app.get("/ui/advanced", response_class=HTMLResponse)
