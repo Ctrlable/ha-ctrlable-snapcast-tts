@@ -15,5 +15,5 @@ RUN apk add --no-cache \
 COPY app/ /app/
 COPY rootfs/ /
 
-WORKDIR /app
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"]
+WORKDIR /
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8099"]

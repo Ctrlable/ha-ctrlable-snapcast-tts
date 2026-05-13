@@ -73,17 +73,16 @@
     {% endif %}
   </header>
   <nav>
-    <a href="/ui/" {% if active == 'connection' %}class="active"{% endif %}>Connection</a>
-    <a href="/ui/clients" {% if active == 'clients' %}class="active"{% endif %}>Clients</a>
-    <a href="/ui/activity" {% if active == 'activity' %}class="active"{% endif %}>Activity</a>
-    <a href="/ui/advanced" {% if active == 'advanced' %}class="active"{% endif %}>Advanced</a>
+    <a href="{{ ingress_path }}/ui/" {% if active == 'connection' %}class="active"{% endif %}>Connection</a>
+    <a href="{{ ingress_path }}/ui/clients" {% if active == 'clients' %}class="active"{% endif %}>Clients</a>
+    <a href="{{ ingress_path }}/ui/activity" {% if active == 'activity' %}class="active"{% endif %}>Activity</a>
+    <a href="{{ ingress_path }}/ui/advanced" {% if active == 'advanced' %}class="active"{% endif %}>Advanced</a>
   </nav>
   <main>
     {% block content %}{% endblock %}
   </main>
   <script>
-    // Auto-refresh pages that show live data
-    const REFRESH_PAGES = ['/ui/clients', '/ui/activity'];
+    const REFRESH_PAGES = ['{{ ingress_path }}/ui/clients', '{{ ingress_path }}/ui/activity'];
     if (REFRESH_PAGES.some(p => location.pathname.startsWith(p))) {
       setTimeout(() => location.reload(), 10000);
     }

@@ -8,7 +8,7 @@
 
 <div class="card">
   <h2>Snapcast Connection</h2>
-  <form method="post" action="/ui/connection">
+  <form method="post" action="{{ ingress_path }}/ui/connection">
     <label>Snapcast Host (announcement server)</label>
     <input type="text" name="snapcast_host" value="{{ snapcast_host }}" placeholder="10.1.8.9">
     <label>RPC Port</label>

@@ -163,8 +163,18 @@ async def api_status() -> dict:
 
 # ── Ingress UI ────────────────────────────────────────────────────
 
+def _ingress_path(request: Request) -> str:
+    return request.headers.get("X-Ingress-Path", "").rstrip("/")
+
+
 def _base_ctx(request: Request, active: str) -> dict:
-    return {"request": request, "active": active, "degraded": _degraded, "version": VERSION}
+    return {
+        "request": request,
+        "active": active,
+        "degraded": _degraded,
+        "version": VERSION,
+        "ingress_path": _ingress_path(request),
+    }
 
 
 @app.get("/ui/", response_class=HTMLResponse)

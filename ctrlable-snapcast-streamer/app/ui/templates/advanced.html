@@ -10,7 +10,7 @@
     <button class="btn-secondary btn-sm" onclick="toggleToken()">Show</button>
     <button class="btn-secondary btn-sm" onclick="copyToken()">Copy</button>
   </div>
-  <form method="post" action="/ui/advanced/regenerate_token" style="margin-top:12px">
+  <form method="post" action="{{ ingress_path }}/ui/advanced/regenerate_token" style="margin-top:12px">
     <button type="submit" class="btn-secondary btn-sm"
             onclick="return confirm('Regenerate token? The integration will need to be updated.')">
       Regenerate token
