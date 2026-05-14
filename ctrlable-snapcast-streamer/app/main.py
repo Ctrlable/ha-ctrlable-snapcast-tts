@@ -18,6 +18,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from auth import require_auth
+from mapping import (
+    NoMatchingMappingError,
+    SatelliteNotMappedError,
+    delete as _delete_mapping,
+    resolve as _resolve_mapping,
+    upsert as _upsert_mapping,
+)
 from provisioning import get_config_snippet, scan_and_link
 from snapcast import (
     SnapcastClient,
@@ -69,7 +76,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.18"  # keep in sync with config.yaml
+VERSION = "0.1.19"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -244,6 +251,84 @@ async def api_announce_multi(body: AnnounceMultiBody) -> list[dict]:
     return out
 
 
+class AnnounceBySatelliteBody(BaseModel):
+    satellite_id: str
+    wake_word: str | None = None
+    url: str
+    source_host: str
+
+
+@app.post("/announce/by_satellite", dependencies=[Depends(require_auth)])
+async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]:
+    state = get_state()
+    try:
+        target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
+    except SatelliteNotMappedError:
+        raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping")
+    except NoMatchingMappingError:
+        raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}")
+
+    try:
+        if len(target_ids) == 1:
+            result = await announce(target_ids[0], body.url, body.source_host)
+            out = [{"client_id": target_ids[0], "duration": round(result.duration, 3), "format": result.fmt}]
+        else:
+            results = await announce_multi(target_ids, body.url, body.source_host)
+            out = [{"client_id": r.client_id, "duration": round(r.duration, 3), "format": r.fmt} for r in results]
+        for r in out:
+            _add_activity(r["client_id"], r["format"], r["duration"], ok=True)
+        return out
+    except ClientNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Client not found: {exc}") from exc
+    except ClientNotEnabledError as exc:
+        raise HTTPException(status_code=409, detail=f"Client not enabled: {exc}") from exc
+    except NotProvisionedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SnapcastRPCError, SnapcastTimeoutError) as exc:
+        for cid in target_ids:
+            _add_activity(cid, "", None, ok=False, error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        for cid in target_ids:
+            _add_activity(cid, "", None, ok=False, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Mappings API ──────────────────────────────────────────────────
+
+@app.get("/mappings", dependencies=[Depends(require_auth)])
+async def api_get_mappings() -> list[dict]:
+    return get_state().mappings
+
+
+class UpsertMappingBody(BaseModel):
+    satellite_id: str
+    wake_word: str = "*"
+    target_snapclient_ids: list[str]
+    notes: str = ""
+
+
+@app.post("/mappings", dependencies=[Depends(require_auth)])
+async def api_upsert_mapping(body: UpsertMappingBody) -> dict:
+    state = get_state()
+    state.mappings = _upsert_mapping(state.mappings, body.satellite_id, body.wake_word, body.target_snapclient_ids, body.notes)
+    save_state()
+    return {"ok": True}
+
+
+class DeleteMappingBody(BaseModel):
+    satellite_id: str
+    wake_word: str
+
+
+@app.delete("/mappings", dependencies=[Depends(require_auth)])
+async def api_delete_mapping(body: DeleteMappingBody) -> dict:
+    state = get_state()
+    state.mappings = _delete_mapping(state.mappings, body.satellite_id, body.wake_word)
+    save_state()
+    return {"ok": True}
+
+
 # ── Ingress UI ────────────────────────────────────────────────────
 
 def _ingress_path(request: Request) -> str:
@@ -414,7 +499,7 @@ async def ui_streams(request: Request):
             "name": cs.name or cid,
             "announce_port": cs.announce_port,
             "announce_group_id": cs.announce_group_id,
-            "home_group_id": cs.home_group_id,
+            "announce_stream_id": cs.announce_stream_id,
         }
         for cid, cs in enabled.items()
     ]
@@ -452,6 +537,63 @@ async def ui_streams_scan(request: Request):
     return RedirectResponse(f"{ingress}/ui/streams?msg={msg}&t={t}", status_code=303)
 
 
+@app.get("/ui/mappings", response_class=HTMLResponse)
+async def ui_mappings(request: Request):
+    state = get_state()
+    enabled_clients = [
+        {"id": cid, "name": cs.name or cid}
+        for cid, cs in state.clients.items()
+        if cs.enabled
+    ]
+    client_names = {cid: (cs.name or cid) for cid, cs in state.clients.items()}
+    ctx = _base_ctx(request, "mappings")
+    ctx.update({
+        "mappings": state.mappings,
+        "enabled_clients": enabled_clients,
+        "client_names": client_names,
+        "message": request.query_params.get("msg"),
+        "message_type": request.query_params.get("t", "ok"),
+    })
+    return templates.TemplateResponse(request, "mappings.html", ctx)
+
+
+@app.post("/ui/mappings/add", response_class=HTMLResponse)
+async def ui_mappings_add(
+    request: Request,
+    satellite_id: str = Form(...),
+    wake_word: str = Form("*"),
+    target_snapclient_ids: list[str] = Form(default=[]),
+    notes: str = Form(""),
+):
+    ingress = _ingress_path(request)
+    if not satellite_id.strip():
+        return RedirectResponse(f"{ingress}/ui/mappings?msg=Satellite+ID+is+required&t=error", status_code=303)
+    if not target_snapclient_ids:
+        return RedirectResponse(f"{ingress}/ui/mappings?msg=Select+at+least+one+target+client&t=error", status_code=303)
+    state = get_state()
+    state.mappings = _upsert_mapping(
+        state.mappings,
+        satellite_id.strip(),
+        wake_word.strip() or "*",
+        target_snapclient_ids,
+        notes.strip(),
+    )
+    save_state()
+    return RedirectResponse(f"{ingress}/ui/mappings?msg=Mapping+saved&t=ok", status_code=303)
+
+
+@app.post("/ui/mappings/delete", response_class=HTMLResponse)
+async def ui_mappings_delete(
+    request: Request,
+    satellite_id: str = Form(...),
+    wake_word: str = Form(...),
+):
+    state = get_state()
+    state.mappings = _delete_mapping(state.mappings, satellite_id, wake_word)
+    save_state()
+    return RedirectResponse(f"{_ingress_path(request)}/ui/mappings?msg=Mapping+deleted&t=ok", status_code=303)
+
+
 @app.get("/ui/advanced", response_class=HTMLResponse)
 async def ui_advanced(request: Request):
     state = get_state()
@@ -463,6 +605,7 @@ async def ui_advanced(request: Request):
             "snapcast": asdict(state.snapcast),
             "clients": {k: asdict(v) for k, v in state.clients.items()},
             "ports_in_use": state.ports_in_use,
+            "mappings": state.mappings,
         },
         indent=2,
     )

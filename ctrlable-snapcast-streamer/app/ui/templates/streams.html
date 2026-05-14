@@ -31,7 +31,7 @@
         <th>Announce Port</th>
         <th>Stream Status</th>
         <th>Announce Group</th>
-        <th>Home Group</th>
+        <th>Announce Stream</th>
       </tr>
     </thead>
     <tbody>
@@ -40,8 +40,10 @@
       <td>{{ c.name }}</td>
       <td class="mono">{{ c.announce_port or '—' }}</td>
       <td>
-        {% if c.announce_group_id %}
+        {% if c.announce_stream_id %}
         <span style="color:var(--success)">&#10003; Linked</span>
+        {% elif c.announce_group_id %}
+        <span style="color:var(--warn)">&#9651; Legacy</span>
         {% else %}
         <span style="color:var(--warn)">Needs config</span>
         {% endif %}
@@ -50,7 +52,7 @@
         {% if c.announce_group_id %}{{ c.announce_group_id[:16] }}…{% else %}—{% endif %}
       </td>
       <td class="mono" style="font-size:11px">
-        {% if c.home_group_id %}{{ c.home_group_id[:16] }}…{% else %}—{% endif %}
+        {{ c.announce_stream_id or '—' }}
       </td>
     </tr>
     {% endfor %}

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+{% if message %}
+<div class="alert alert-{{ message_type }}" style="margin-bottom:16px">{{ message }}</div>
+{% endif %}
+
+<div class="card">
+  <h2>Add mapping</h2>
+  <form method="post" action="{{ ingress_path }}/ui/mappings/add">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <label>Satellite ID</label>
+        <input type="text" name="satellite_id" placeholder="e.g. m5stack-atom-echo-a14640" required>
+      </div>
+      <div>
+        <label>Wake Word <span style="color:var(--muted);font-size:11px">(* = match any)</span></label>
+        <input type="text" name="wake_word" value="*" placeholder="*">
+      </div>
+    </div>
+    <label>Target Snapcast Client(s) <span style="color:var(--muted);font-size:11px">(hold Ctrl/Cmd to select multiple)</span></label>
+    {% if enabled_clients %}
+    <select name="target_snapclient_ids" multiple required
+            style="height:{{ [enabled_clients|length * 36, 160]|min }}px;min-height:60px">
+      {% for c in enabled_clients %}
+      <option value="{{ c.id }}">{{ c.name }}</option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <p style="color:var(--warn);font-size:13px;padding:8px 0">
+      No enabled clients. Enable clients on the <a href="{{ ingress_path }}/ui/clients" style="color:var(--accent)">Clients tab</a> first.
+    </p>
+    {% endif %}
+    <label>Notes <span style="color:var(--muted);font-size:11px">(optional)</span></label>
+    <input type="text" name="notes" placeholder="e.g. bedroom echo">
+    <div style="margin-top:16px">
+      <button type="submit" class="btn-primary" {% if not enabled_clients %}disabled{% endif %}>Add / Update Mapping</button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Current mappings</h2>
+  {% if mappings %}
+  <table>
+    <thead>
+      <tr>
+        <th>Satellite ID</th>
+        <th>Wake Word</th>
+        <th>Target Client(s)</th>
+        <th>Notes</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for m in mappings %}
+    <tr>
+      <td class="mono" style="font-size:12px">{{ m.satellite_id }}</td>
+      <td class="mono">{{ m.wake_word }}</td>
+      <td style="font-size:13px">
+        {% for cid in m.target_snapclient_ids %}
+        <span title="{{ cid }}">{{ client_names.get(cid, cid) }}</span>{% if not loop.last %}<span style="color:var(--muted)">, </span>{% endif %}
+        {% endfor %}
+      </td>
+      <td style="color:var(--muted);font-size:12px">{{ m.notes or '' }}</td>
+      <td style="width:80px">
+        <form method="post" action="{{ ingress_path }}/ui/mappings/delete">
+          <input type="hidden" name="satellite_id" value="{{ m.satellite_id }}">
+          <input type="hidden" name="wake_word" value="{{ m.wake_word }}">
+          <button type="submit" class="btn-sm btn-secondary" style="color:var(--error)">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No mappings configured yet. Add one above.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>How routing works</h2>
+  <ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:20px">
+    <li>When an ESP32 satellite triggers TTS, it sends its <strong>satellite ID</strong> and (optionally) the <strong>wake word</strong></li>
+    <li>The add-on looks up the mapping row for that satellite + wake word (or falls back to the <code>*</code> wildcard row)</li>
+    <li>Audio streams to the matched Snapcast client(s), switching their source temporarily and restoring it after</li>
+  </ol>
+</div>
+{% endblock %}

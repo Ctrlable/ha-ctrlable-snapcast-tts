@@ -22,31 +22,18 @@
   "options": {
     "step": {
       "init": {
-        "title": "Satellite → Snapcast Mappings",
-        "menu_options": {
-          "add_mapping": "Add / update mapping",
-          "remove_mapping": "Remove mapping",
-          "done": "Save and close"
-        }
-      },
-      "add_mapping": {
-        "title": "Add / Update Mapping",
-        "description": "Map a satellite + wake word to one or more Snapcast clients. Use * as wake word to match any.",
+        "title": "Connection Settings",
+        "description": "Manage satellite → snapclient mappings in the add-on web UI (Mappings tab).",
         "data": {
-          "satellite_id": "Satellite ID",
-          "wake_word": "Wake Word (* = any)",
-          "target_snapclient_ids": "Target Snapcast Client(s)"
-        }
-      },
-      "remove_mapping": {
-        "title": "Remove Mapping",
-        "data": {
-          "mapping_key": "Mapping to remove"
+          "addon_url": "Add-on URL",
+          "bearer_token": "Bearer Token"
         }
       }
     },
     "error": {
-      "required": "This field is required."
+      "cannot_connect": "Cannot connect to the add-on. Check the URL and that the add-on is running.",
+      "invalid_auth": "Invalid bearer token.",
+      "unknown": "Unexpected error."
     }
   }
 }

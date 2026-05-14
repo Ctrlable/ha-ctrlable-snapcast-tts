@@ -24,11 +24,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_ADDON_URL],
         entry.data[CONF_BEARER_TOKEN],
     )
-    mappings: list[dict] = list(entry.options.get("mappings", []))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client,
-        "mappings": mappings,
     }
 
     hass.services.async_register(

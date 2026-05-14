@@ -8,14 +8,14 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 
-from .api import AddonApiClient, CannotConnectError, InvalidAuthError
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, EVENT_ANNOUNCED
-from .mapping import (
+from .api import (
+    AddonApiClient,
+    CannotConnectError,
+    InvalidAuthError,
     NoMatchingMappingError,
     SatelliteNotMappedError,
-    resolve,
-    upsert,
 )
+from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, EVENT_ANNOUNCED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,14 +46,6 @@ def _get_client(hass: HomeAssistant) -> AddonApiClient | None:
     return entries[entry_id]["client"]
 
 
-def _get_mappings(hass: HomeAssistant) -> list[dict]:
-    entries = hass.data.get(DOMAIN, {})
-    if not entries:
-        return []
-    entry_id = next(iter(entries))
-    return entries[entry_id].get("mappings", [])
-
-
 def _source_host(hass: HomeAssistant) -> str:
     try:
         url = hass.config.internal_url or hass.config.external_url or ""
@@ -82,7 +74,7 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
             )
             return
         try:
-            target_ids = resolve(_get_mappings(hass), satellite_id, wake_word)
+            results = await client.announce_by_satellite(satellite_id, wake_word, url, source_host)
         except SatelliteNotMappedError:
             _LOGGER.warning(
                 "ctrlable_snapcast_tts: satellite %r has no mapping configured", satellite_id
@@ -95,6 +87,22 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
                 wake_word,
             )
             return
+        except CannotConnectError:
+            _LOGGER.error("ctrlable_snapcast_tts: cannot reach add-on at %s", client._url)
+            return
+        except InvalidAuthError:
+            _LOGGER.error("ctrlable_snapcast_tts: bearer token rejected by add-on")
+            return
+        except Exception as exc:
+            _LOGGER.error("ctrlable_snapcast_tts: announce failed — %s", exc)
+            return
+
+        hass.bus.async_fire(
+            EVENT_ANNOUNCED,
+            {"url": url, "satellite_id": satellite_id, "wake_word": wake_word, "results": results},
+        )
+        _LOGGER.debug("ctrlable_snapcast_tts: announced via satellite %r — %s", satellite_id, results)
+        return
 
     try:
         if len(target_ids) == 1:
@@ -114,38 +122,33 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
 
     hass.bus.async_fire(
         EVENT_ANNOUNCED,
-        {
-            "url": url,
-            "satellite_id": call.data.get("satellite_id"),
-            "wake_word": call.data.get("wake_word"),
-            "results": results,
-        },
+        {"url": url, "satellite_id": None, "wake_word": None, "results": results},
     )
     _LOGGER.debug("ctrlable_snapcast_tts: announced to %s — %s", target_ids, results)
 
 
 async def handle_set_mapping(hass: HomeAssistant, call: ServiceCall) -> None:
-    entries = hass.data.get(DOMAIN, {})
-    if not entries:
+    client = _get_client(hass)
+    if client is None:
         _LOGGER.error("ctrlable_snapcast_tts: integration not set up")
         return
 
-    entry_id = next(iter(entries))
-    entry_data = entries[entry_id]
     satellite_id: str = call.data["satellite_id"]
     wake_word: str = call.data["wake_word"]
     target_ids: list[str] = call.data["target_snapclient_ids"]
     notes: str = call.data.get("notes", "")
 
-    new_mappings = upsert(entry_data.get("mappings", []), satellite_id, wake_word, target_ids, notes)
-    entry_data["mappings"] = new_mappings
-
-    # Persist to config entry options
-    config_entry = hass.config_entries.async_get_entry(entry_id)
-    if config_entry:
-        new_options = dict(config_entry.options)
-        new_options["mappings"] = new_mappings
-        hass.config_entries.async_update_entry(config_entry, options=new_options)
+    try:
+        await client.upsert_mapping(satellite_id, wake_word, target_ids, notes)
+    except CannotConnectError:
+        _LOGGER.error("ctrlable_snapcast_tts: cannot reach add-on to save mapping")
+        return
+    except InvalidAuthError:
+        _LOGGER.error("ctrlable_snapcast_tts: bearer token rejected by add-on")
+        return
+    except Exception as exc:
+        _LOGGER.error("ctrlable_snapcast_tts: set_mapping failed — %s", exc)
+        return
 
     _LOGGER.info(
         "ctrlable_snapcast_tts: mapping set — %r [%s] → %s", satellite_id, wake_word, target_ids
