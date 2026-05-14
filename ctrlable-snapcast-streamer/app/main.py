@@ -277,12 +277,14 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
     try:
         if len(target_ids) == 1:
             result = await announce(target_ids[0], body.url, body.source_host)
-            out = [{"client_id": target_ids[0], "duration": round(result.duration, 3), "format": result.fmt}]
+            _add_activity(target_ids[0], result.fmt, result.duration, ok=True)
+            out: list[dict] = [{"client_id": target_ids[0], "duration": round(result.duration, 3), "format": result.fmt}]
         else:
-            results = await announce_multi(target_ids, body.url, body.source_host)
-            out = [{"client_id": r.client_id, "duration": round(r.duration, 3), "format": r.fmt} for r in results]
-        for r in out:
-            _add_activity(r["client_id"], r["format"], r["duration"], ok=True)
+            raw = await announce_multi(target_ids, body.url, body.source_host)
+            out = []
+            for r in raw:
+                _add_activity(r.client_id, r.fmt, r.duration, ok=True)
+                out.append({"client_id": r.client_id, "duration": round(r.duration, 3), "format": r.fmt})
         return out
     except ClientNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Client not found: {exc}") from exc
