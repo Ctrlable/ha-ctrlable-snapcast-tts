@@ -15,7 +15,7 @@ from .api import (
     NoMatchingMappingError,
     SatelliteNotMappedError,
 )
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, EVENT_ANNOUNCED
+from .const import DOMAIN, EVENT_ANNOUNCED
 
 _LOGGER = logging.getLogger(__name__)
 

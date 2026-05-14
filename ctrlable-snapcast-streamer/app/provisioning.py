@@ -131,8 +131,6 @@ async def scan_and_link(snap: SnapcastClient) -> dict[str, str]:
         # ── Strategy 2: fallback — adopt current group's TCP port ────────────
         # Used for setups without named per-client streams (legacy).
         if cur_gid:
-            from snapcast import SnapcastClient as _SC  # avoid circular; just for type ref
-            # Need groups for this fallback
             groups = await snap.list_groups()
             cur_group = next((g for g in groups if g.id == cur_gid), None)
             if cur_group and cur_group.stream_id:

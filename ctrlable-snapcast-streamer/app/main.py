@@ -21,8 +21,14 @@ from auth import require_auth
 from mapping import (
     NoMatchingMappingError,
     SatelliteNotMappedError,
+)
+from mapping import (
     delete as _delete_mapping,
+)
+from mapping import (
     resolve as _resolve_mapping,
+)
+from mapping import (
     upsert as _upsert_mapping,
 )
 from provisioning import get_config_snippet, scan_and_link
@@ -264,9 +270,9 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
     try:
         target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
     except SatelliteNotMappedError:
-        raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping")
+        raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping") from None
     except NoMatchingMappingError:
-        raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}")
+        raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}") from None
 
     try:
         if len(target_ids) == 1:
@@ -562,20 +568,21 @@ async def ui_mappings_add(
     request: Request,
     satellite_id: str = Form(...),
     wake_word: str = Form("*"),
-    target_snapclient_ids: list[str] = Form(default=[]),
+    target_snapclient_ids: list[str] | None = Form(None),
     notes: str = Form(""),
 ):
+    ids = target_snapclient_ids or []
     ingress = _ingress_path(request)
     if not satellite_id.strip():
         return RedirectResponse(f"{ingress}/ui/mappings?msg=Satellite+ID+is+required&t=error", status_code=303)
-    if not target_snapclient_ids:
+    if not ids:
         return RedirectResponse(f"{ingress}/ui/mappings?msg=Select+at+least+one+target+client&t=error", status_code=303)
     state = get_state()
     state.mappings = _upsert_mapping(
         state.mappings,
         satellite_id.strip(),
         wake_word.strip() or "*",
-        target_snapclient_ids,
+        ids,
         notes.strip(),
     )
     save_state()
