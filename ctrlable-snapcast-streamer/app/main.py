@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -82,7 +83,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.19"  # keep in sync with config.yaml
+VERSION = "0.1.20"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -343,6 +344,31 @@ def _ingress_path(request: Request) -> str:
     return request.headers.get("X-Ingress-Path", "").rstrip("/")
 
 
+async def _fetch_ha_satellites() -> list[dict]:
+    """Return assist_satellite entities from HA, as {id, name} pairs."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                "http://supervisor/core/api/states",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code != 200:
+            return []
+        satellites = []
+        for s in resp.json():
+            eid = s.get("entity_id", "")
+            if eid.startswith("assist_satellite."):
+                sat_id = eid[len("assist_satellite."):].replace("_", "-")
+                name = s.get("attributes", {}).get("friendly_name") or sat_id
+                satellites.append({"id": sat_id, "name": name})
+        return sorted(satellites, key=lambda x: x["name"].lower())
+    except Exception:
+        return []
+
+
 def _base_ctx(request: Request, active: str) -> dict:
     return {
         "active": active,
@@ -548,17 +574,21 @@ async def ui_streams_scan(request: Request):
 @app.get("/ui/mappings", response_class=HTMLResponse)
 async def ui_mappings(request: Request):
     state = get_state()
+    ha_satellites = await _fetch_ha_satellites()
     enabled_clients = [
         {"id": cid, "name": cs.name or cid}
         for cid, cs in state.clients.items()
         if cs.enabled
     ]
     client_names = {cid: (cs.name or cid) for cid, cs in state.clients.items()}
+    ha_satellite_names = {s["id"]: s["name"] for s in ha_satellites}
     ctx = _base_ctx(request, "mappings")
     ctx.update({
         "mappings": state.mappings,
         "enabled_clients": enabled_clients,
         "client_names": client_names,
+        "ha_satellites": ha_satellites,
+        "ha_satellite_names": ha_satellite_names,
         "message": request.query_params.get("msg"),
         "message_type": request.query_params.get("t", "ok"),
     })

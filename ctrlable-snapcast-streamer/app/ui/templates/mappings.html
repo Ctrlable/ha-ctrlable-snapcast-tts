@@ -1,39 +1,109 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+  .client-card {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border: 1.5px solid var(--border); border-radius: 8px;
+    cursor: pointer; background: var(--bg); transition: border-color .15s, background .15s;
+    user-select: none;
+  }
+  .client-card.checked {
+    border-color: var(--accent); background: rgba(10,132,255,0.10);
+  }
+  .client-card input[type=checkbox] {
+    width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer;
+  }
+  .client-card .client-label { font-size: 13px; font-weight: 500; }
+  .pill {
+    display: inline-block; background: var(--border); padding: 2px 9px;
+    border-radius: 10px; font-size: 12px; margin: 2px 2px 0 0;
+  }
+  .pill-accent {
+    display: inline-block; background: rgba(10,132,255,0.15); color: var(--accent);
+    border: 1px solid rgba(10,132,255,0.3); padding: 2px 9px;
+    border-radius: 10px; font-size: 12px; margin: 2px 2px 0 0;
+  }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+  input[list] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238e8e93'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; }
+</style>
+
 {% if message %}
 <div class="alert alert-{{ message_type }}" style="margin-bottom:16px">{{ message }}</div>
 {% endif %}
 
 <div class="card">
-  <h2>Add mapping</h2>
-  <form method="post" action="{{ ingress_path }}/ui/mappings/add">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <h2>Add / update mapping</h2>
+  <form method="post" action="{{ ingress_path }}/ui/mappings/add" id="mapping-form">
+
+    <div class="field-row" style="margin-top:4px">
       <div>
-        <label>Satellite ID</label>
-        <input type="text" name="satellite_id" placeholder="e.g. m5stack-atom-echo-a14640" required>
+        <label>Satellite</label>
+        <input type="text" name="satellite_id" id="sat-input"
+               list="sat-list" autocomplete="off" required
+               placeholder="{% if ha_satellites %}Start typing to search…{% else %}m5stack-atom-echo-a14640{% endif %}">
+        <datalist id="sat-list">
+          {% for s in ha_satellites %}
+          <option value="{{ s.id }}">{{ s.name }}</option>
+          {% endfor %}
+        </datalist>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          {% if ha_satellites %}
+          {{ ha_satellites|length }} satellite(s) found in Home Assistant
+          {% else %}
+          No <code>assist_satellite</code> entities found — enter the ESPHome device name manually
+          {% endif %}
+        </div>
       </div>
       <div>
-        <label>Wake Word <span style="color:var(--muted);font-size:11px">(* = match any)</span></label>
-        <input type="text" name="wake_word" value="*" placeholder="*">
+        <label>Wake word <span style="color:var(--muted);font-size:11px">(*&nbsp;=&nbsp;match&nbsp;any)</span></label>
+        <input type="text" name="wake_word" list="ww-list" value="*" autocomplete="off">
+        <datalist id="ww-list">
+          <option value="*">
+          <option value="okay nabu">
+          <option value="hey jarvis">
+          <option value="alexa">
+          <option value="hey mycroft">
+          <option value="hey siri">
+        </datalist>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          Use <code>*</code> to route all wake words to the same room
+        </div>
       </div>
     </div>
-    <label>Target Snapcast Client(s) <span style="color:var(--muted);font-size:11px">(hold Ctrl/Cmd to select multiple)</span></label>
+
+    <label style="margin-top:18px;display:block">Target Snapcast client(s)</label>
     {% if enabled_clients %}
-    <select name="target_snapclient_ids" multiple required
-            style="height:{{ [enabled_clients|length * 36, 160]|min }}px;min-height:60px">
+    <div id="client-grid"
+         style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;margin-top:8px">
       {% for c in enabled_clients %}
-      <option value="{{ c.id }}">{{ c.name }}</option>
+      <label class="client-card" id="card-{{ loop.index }}">
+        <input type="checkbox" name="target_snapclient_ids" value="{{ c.id }}"
+               data-card="card-{{ loop.index }}">
+        <span class="client-label">{{ c.name }}</span>
+      </label>
       {% endfor %}
-    </select>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px">Click cards to select — multiple rooms supported</div>
     {% else %}
-    <p style="color:var(--warn);font-size:13px;padding:8px 0">
-      No enabled clients. Enable clients on the <a href="{{ ingress_path }}/ui/clients" style="color:var(--accent)">Clients tab</a> first.
-    </p>
+    <div class="alert alert-warn" style="margin-top:8px">
+      No enabled clients. Enable clients on the
+      <a href="{{ ingress_path }}/ui/clients" style="color:var(--accent)">Clients tab</a> first.
+    </div>
     {% endif %}
-    <label>Notes <span style="color:var(--muted);font-size:11px">(optional)</span></label>
-    <input type="text" name="notes" placeholder="e.g. bedroom echo">
-    <div style="margin-top:16px">
-      <button type="submit" class="btn-primary" {% if not enabled_clients %}disabled{% endif %}>Add / Update Mapping</button>
+
+    <div class="field-row" style="margin-top:18px">
+      <div>
+        <label>Notes <span style="color:var(--muted);font-size:11px">(optional)</span></label>
+        <input type="text" name="notes" placeholder="e.g. bedroom echo, only hey jarvis">
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <button type="submit" class="btn-primary" style="width:100%"
+                {% if not enabled_clients %}disabled{% endif %}>
+          Add / Update Mapping
+        </button>
+      </div>
     </div>
   </form>
 </div>
@@ -44,7 +114,7 @@
   <table>
     <thead>
       <tr>
-        <th>Satellite ID</th>
+        <th>Satellite</th>
         <th>Wake Word</th>
         <th>Target Client(s)</th>
         <th>Notes</th>
@@ -54,19 +124,27 @@
     <tbody>
     {% for m in mappings %}
     <tr>
-      <td class="mono" style="font-size:12px">{{ m.satellite_id }}</td>
-      <td class="mono">{{ m.wake_word }}</td>
       <td style="font-size:13px">
+        <strong>{{ ha_satellite_names.get(m.satellite_id, m.satellite_id) }}</strong>
+        {% if ha_satellite_names.get(m.satellite_id) %}
+        <div class="mono" style="font-size:11px;color:var(--muted)">{{ m.satellite_id }}</div>
+        {% endif %}
+      </td>
+      <td>
+        <span class="pill mono">{{ m.wake_word }}</span>
+      </td>
+      <td>
         {% for cid in m.target_snapclient_ids %}
-        <span title="{{ cid }}">{{ client_names.get(cid, cid) }}</span>{% if not loop.last %}<span style="color:var(--muted)">, </span>{% endif %}
+        <span class="pill-accent" title="{{ cid }}">{{ client_names.get(cid, cid) }}</span>
         {% endfor %}
       </td>
       <td style="color:var(--muted);font-size:12px">{{ m.notes or '' }}</td>
-      <td style="width:80px">
+      <td style="width:76px;text-align:right">
         <form method="post" action="{{ ingress_path }}/ui/mappings/delete">
           <input type="hidden" name="satellite_id" value="{{ m.satellite_id }}">
           <input type="hidden" name="wake_word" value="{{ m.wake_word }}">
-          <button type="submit" class="btn-sm btn-secondary" style="color:var(--error)">Delete</button>
+          <button type="submit" class="btn-sm btn-secondary"
+                  style="color:var(--error)">Delete</button>
         </form>
       </td>
     </tr>
@@ -74,16 +152,26 @@
     </tbody>
   </table>
   {% else %}
-  <p style="color:var(--muted)">No mappings configured yet. Add one above.</p>
+  <p style="color:var(--muted)">No mappings yet — add one above.</p>
   {% endif %}
 </div>
 
 <div class="card">
   <h2>How routing works</h2>
   <ol style="color:var(--muted);font-size:13px;line-height:2;padding-left:20px">
-    <li>When an ESP32 satellite triggers TTS, it sends its <strong>satellite ID</strong> and (optionally) the <strong>wake word</strong></li>
-    <li>The add-on looks up the mapping row for that satellite + wake word (or falls back to the <code>*</code> wildcard row)</li>
-    <li>Audio streams to the matched Snapcast client(s), switching their source temporarily and restoring it after</li>
+    <li>When an ESP32 says the wake word, HA Assist fires a TTS announce event with the satellite's device name</li>
+    <li>The add-on looks up the satellite + wake word (or the <code>*</code> wildcard row) in this table</li>
+    <li>Audio streams to the matched Snapcast client(s) — source switches temporarily, then restores</li>
   </ol>
 </div>
+
+<script>
+  document.querySelectorAll('.client-card input[type=checkbox]').forEach(cb => {
+    function sync() {
+      cb.closest('.client-card').classList.toggle('checked', cb.checked);
+    }
+    cb.addEventListener('change', sync);
+    sync();
+  });
+</script>
 {% endblock %}
