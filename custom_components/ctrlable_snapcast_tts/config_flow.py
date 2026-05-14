@@ -24,7 +24,7 @@ def _default_addon_url(hass) -> str:
     return f"http://{host}:8099"
 
 
-class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):
+class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     VERSION = 1
 
     async def async_step_user(
