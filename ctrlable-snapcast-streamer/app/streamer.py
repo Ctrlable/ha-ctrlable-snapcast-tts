@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import struct
 import time
 from dataclasses import dataclass
 
@@ -14,7 +15,14 @@ from state import get_state, save_state
 
 _LOGGER = logging.getLogger(__name__)
 _BUFFER_DRAIN = 1.5  # seconds after stream end before restoring group
+_SILENCE_PADDING_MS = 300  # ms of silence prepended to every announcement
 _locks: dict[str, asyncio.Lock] = {}
+
+
+def _silence_pcm(sample_rate: int, channels: int, sample_width: int) -> bytes:
+    """Return silent PCM frames for _SILENCE_PADDING_MS at the given format."""
+    n_frames = int(sample_rate * _SILENCE_PADDING_MS / 1000)
+    return bytes(n_frames * channels * sample_width)
 
 
 def _lock(client_id: str) -> asyncio.Lock:
@@ -55,18 +63,28 @@ async def detect_format(url: str) -> str:
 
 async def _stream_pcm(url: str, host: str, port: int) -> None:
     """Fetch URL, strip 44-byte WAV header if present, pipe raw PCM to Snapcast TCP source."""
-    sock_writer: asyncio.StreamWriter | None = None
     header_stripped = False
     buf = b""
+    sock_writer: asyncio.StreamWriter | None = None
     async with httpx.AsyncClient(verify=False, timeout=30) as http, http.stream("GET", url) as resp:
         async for chunk in resp.aiter_bytes(4096):
                 buf += chunk
                 if not header_stripped and len(buf) >= 44:
-                    buf = buf[44:] if buf[:4] == b"RIFF" else buf
+                    if buf[:4] == b"RIFF":
+                        # Parse WAV header so silence matches the stream format.
+                        channels = struct.unpack_from("<H", buf, 22)[0]
+                        sample_rate = struct.unpack_from("<I", buf, 24)[0]
+                        bits_per_sample = struct.unpack_from("<H", buf, 34)[0]
+                        silence = _silence_pcm(sample_rate, channels, bits_per_sample // 8)
+                        buf = buf[44:]
+                    else:
+                        silence = _silence_pcm(48000, 2, 2)
                     header_stripped = True
+                    _, sock_writer = await asyncio.open_connection(host, port)
+                    sock_writer.write(silence)
+                    await sock_writer.drain()
                 if header_stripped and buf:
-                    if sock_writer is None:
-                        _, sock_writer = await asyncio.open_connection(host, port)
+                    assert sock_writer is not None
                     sock_writer.write(buf)
                     await sock_writer.drain()
                     buf = b""
@@ -88,6 +106,8 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> None:
     )
     _, sock_writer = await asyncio.open_connection(host, port)
     try:
+        sock_writer.write(_silence_pcm(48000, 2, 2))
+        await sock_writer.drain()
         assert proc.stdout is not None
         while chunk := await proc.stdout.read(4096):
             sock_writer.write(chunk)
