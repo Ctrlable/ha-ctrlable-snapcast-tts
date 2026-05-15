@@ -106,6 +106,12 @@ switch:
     on_turn_off:
       - light.turn_off: status_led
       - micro_wake_word.start:
+  - platform: template
+    id: local_speaker_switch
+    name: "Use local speaker"
+    icon: "mdi:speaker"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
 
 light:
   - platform: esp32_rmt_led_strip
@@ -149,33 +155,41 @@ voice_assistant:
         condition:
           lambda: 'return !x.empty();'
         then:
-          - lambda: 'id(last_tts_url) = x;'
-          - media_player.stop:
-              id: tts_media_player
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.announce
-              data:
-                url: !lambda 'return x;'
-                satellite_id: "${name}"
-                wake_word: !lambda 'return id(current_wake_word);'
+          - if:
+              condition:
+                switch.is_off: local_speaker_switch
+              then:
+                - lambda: 'id(last_tts_url) = x;'
+                - media_player.stop:
+                    id: tts_media_player
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.announce
+                    data:
+                      url: !lambda 'return x;'
+                      satellite_id: "${name}"
+                      wake_word: !lambda 'return id(current_wake_word);'
 
   on_tts_end:
-    # Stop local playback immediately — Snapcast handles all audio output.
-    # Without this the voice_assistant auto-plays the MP3 over HTTPS/TLS,
-    # which competes with micro_wake_word for heap and causes ESP_ERR_NO_MEM.
-    - media_player.stop:
-        id: tts_media_player
     - if:
         condition:
-          lambda: 'return !x.empty() && x != id(last_tts_url);'
+          switch.is_off: local_speaker_switch
         then:
-          - lambda: 'id(last_tts_url) = x;'
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.announce
-              data:
-                url: !lambda 'return x;'
-                satellite_id: "${name}"
-                wake_word: !lambda 'return id(current_wake_word);'
+          # Stop local playback immediately — Snapcast handles all audio output.
+          # Without this the voice_assistant auto-plays the MP3 over HTTPS/TLS,
+          # which competes with micro_wake_word for heap and causes ESP_ERR_NO_MEM.
+          - media_player.stop:
+              id: tts_media_player
+          - if:
+              condition:
+                lambda: 'return !x.empty() && x != id(last_tts_url);'
+              then:
+                - lambda: 'id(last_tts_url) = x;'
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.announce
+                    data:
+                      url: !lambda 'return x;'
+                      satellite_id: "${name}"
+                      wake_word: !lambda 'return id(current_wake_word);'
 
   on_listening:
     - light.turn_on:
