@@ -13,8 +13,8 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -83,7 +83,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.21"  # keep in sync with config.yaml
+VERSION = "0.1.22"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -164,6 +164,27 @@ async def health() -> dict:
         "version": VERSION,
         "snapcast_connected": not _degraded,
     }
+
+
+# ── TTS HTTP proxy (no auth — URL is cryptographically random) ───────
+
+@app.get("/tts_proxy")
+async def tts_proxy(url: str = Query(...)) -> StreamingResponse:
+    """Fetch a TTS URL server-side and re-serve it over plain HTTP.
+
+    ESP32 devices call this instead of fetching the HTTPS TTS URL directly,
+    avoiding the ~80 KB TLS heap requirement that causes ESP_ERR_NO_MEM.
+    """
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+
+    async def _stream():
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            async with client.stream("GET", url) as resp:
+                async for chunk in resp.aiter_bytes(4096):
+                    yield chunk
+
+    return StreamingResponse(_stream(), media_type="audio/mpeg")
 
 
 # ── Snapcast API endpoints (auth required) ─────────────────────────

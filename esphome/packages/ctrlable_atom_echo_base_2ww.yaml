@@ -4,6 +4,12 @@
 #   friendly_name:         human-readable name
 #   micro_wake_word_model_1: first wake word model  (e.g. okay_nabu)
 #   micro_wake_word_model_2: second wake word model (e.g. hey_jarvis)
+#   addon_http_url: (optional) base URL of the Snapcast TTS add-on reachable
+#                   over plain HTTP from the device, e.g. http://192.168.1.10:8099
+#                   Required only when "Use local speaker" is enabled.
+
+substitutions:
+  addon_http_url: ""
 
 esphome:
   name: ${name}
@@ -171,6 +177,9 @@ voice_assistant:
                       url: !lambda 'return x;'
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
+              else:
+                - media_player.stop:
+                    id: tts_media_player
 
   on_tts_end:
     - if:
@@ -190,6 +199,17 @@ voice_assistant:
                       url: !lambda 'return x;'
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
+        else:
+          - media_player.stop:
+              id: tts_media_player
+          - if:
+              condition:
+                lambda: 'return !x.empty() && !std::string("${addon_http_url}").empty();'
+              then:
+                - lambda: 'id(last_tts_url) = x;'
+                - media_player.play_media:
+                    id: tts_media_player
+                    media_url: !lambda 'return std::string("${addon_http_url}") + "/tts_proxy?url=" + x;'
 
   on_listening:
     - light.turn_on:
