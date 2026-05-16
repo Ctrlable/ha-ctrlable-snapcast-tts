@@ -84,7 +84,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.23"  # keep in sync with config.yaml
+VERSION = "0.1.24"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -171,13 +171,14 @@ async def health() -> dict:
 
 @app.get("/tts_proxy")
 async def tts_proxy(url: str = Query(...)) -> StreamingResponse:
-    """Fetch a TTS URL server-side and re-serve as WAV (16 kHz mono PCM) over plain HTTP.
+    """Fetch a TTS URL server-side and re-serve as FLAC (16 kHz mono) over plain HTTP.
 
     ESP32 devices call this instead of fetching the HTTPS TTS URL directly.
     Two problems are avoided:
       1. TLS heap exhaustion (~80 KB) — we fetch HTTPS server-side.
-      2. MP3 decoder heap exhaustion — we transcode to WAV so the ESP32 only
-         needs a trivial header-strip, not a full MP3 decoder.
+      2. MP3 decoder heap exhaustion (~60-80 KB) — we transcode to FLAC whose
+         decoder needs ~15-30 KB, well within the available heap after the
+         voice pipeline frees its buffers.
     """
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="url must start with http:// or https://")
@@ -186,7 +187,7 @@ async def tts_proxy(url: str = Query(...)) -> StreamingResponse:
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-tls_verify", "0",
             "-i", url,
-            "-f", "wav", "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
+            "-f", "flac", "-ar", "16000", "-ac", "1",
             "-",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -199,7 +200,7 @@ async def tts_proxy(url: str = Query(...)) -> StreamingResponse:
                 proc.kill()
             await proc.wait()
 
-    return StreamingResponse(_stream(), media_type="audio/wav")
+    return StreamingResponse(_stream(), media_type="audio/flac")
 
 
 # ── Snapcast API endpoints (auth required) ─────────────────────────
