@@ -153,7 +153,7 @@ voice_assistant:
     gain_factor: 4
   micro_wake_word: mww
   use_wake_word: false
-  media_player: tts_media_player
+  # No media_player here — see ctrlable_atom_echo_base.yaml for rationale.
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 4.0
@@ -169,8 +169,6 @@ voice_assistant:
                 switch.is_off: local_speaker_switch
               then:
                 - lambda: 'id(last_tts_url) = x;'
-                - media_player.stop:
-                    id: tts_media_player
                 - homeassistant.service:
                     service: ctrlable_snapcast_tts.announce
                     data:
@@ -178,16 +176,20 @@ voice_assistant:
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
               else:
-                - media_player.stop:
-                    id: tts_media_player
+                - if:
+                    condition:
+                      lambda: 'return !std::string("${addon_http_url}").empty();'
+                    then:
+                      - lambda: 'id(last_tts_url) = x;'
+                      - media_player.play_media:
+                          id: tts_media_player
+                          media_url: !lambda 'return std::string("${addon_http_url}") + "/tts_proxy?url=" + x;'
 
   on_tts_end:
     - if:
         condition:
           switch.is_off: local_speaker_switch
         then:
-          - media_player.stop:
-              id: tts_media_player
           - if:
               condition:
                 lambda: 'return !x.empty() && x != id(last_tts_url);'
@@ -200,11 +202,9 @@ voice_assistant:
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
         else:
-          - media_player.stop:
-              id: tts_media_player
           - if:
               condition:
-                lambda: 'return !x.empty() && !std::string("${addon_http_url}").empty();'
+                lambda: 'return !x.empty() && x != id(last_tts_url) && !std::string("${addon_http_url}").empty();'
               then:
                 - lambda: 'id(last_tts_url) = x;'
                 - media_player.play_media:

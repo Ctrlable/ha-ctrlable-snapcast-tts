@@ -150,7 +150,10 @@ voice_assistant:
     gain_factor: 4
   micro_wake_word: mww
   use_wake_word: false
-  media_player: tts_media_player
+  # No media_player here — we handle TTS playback manually in on_intent_progress /
+  # on_tts_end to choose between Snapcast and the local HTTP proxy. Without this
+  # omission, voice_assistant auto-starts an HTTPS connection that races with our
+  # stop call and causes ESP_ERR_NO_MEM before we can intervene.
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 4.0
@@ -166,8 +169,6 @@ voice_assistant:
                 switch.is_off: local_speaker_switch
               then:
                 - lambda: 'id(last_tts_url) = x;'
-                - media_player.stop:
-                    id: tts_media_player
                 - homeassistant.service:
                     service: ctrlable_snapcast_tts.announce
                     data:
@@ -175,21 +176,20 @@ voice_assistant:
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
               else:
-                # Local speaker: abort the auto-started HTTPS fetch immediately to
-                # prevent ESP_ERR_NO_MEM. The proxy URL is played in on_tts_end.
-                - media_player.stop:
-                    id: tts_media_player
+                - if:
+                    condition:
+                      lambda: 'return !std::string("${addon_http_url}").empty();'
+                    then:
+                      - lambda: 'id(last_tts_url) = x;'
+                      - media_player.play_media:
+                          id: tts_media_player
+                          media_url: !lambda 'return std::string("${addon_http_url}") + "/tts_proxy?url=" + x;'
 
   on_tts_end:
     - if:
         condition:
           switch.is_off: local_speaker_switch
         then:
-          # Stop local playback immediately — Snapcast handles all audio output.
-          # Without this the voice_assistant auto-plays the MP3 over HTTPS/TLS,
-          # which competes with micro_wake_word for heap and causes ESP_ERR_NO_MEM.
-          - media_player.stop:
-              id: tts_media_player
           - if:
               condition:
                 lambda: 'return !x.empty() && x != id(last_tts_url);'
@@ -202,13 +202,9 @@ voice_assistant:
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
         else:
-          # Local speaker via HTTP proxy: stop any lingering HTTPS attempt, then
-          # play through the add-on proxy (plain HTTP, no TLS heap overhead).
-          - media_player.stop:
-              id: tts_media_player
           - if:
               condition:
-                lambda: 'return !x.empty() && !std::string("${addon_http_url}").empty();'
+                lambda: 'return !x.empty() && x != id(last_tts_url) && !std::string("${addon_http_url}").empty();'
               then:
                 - lambda: 'id(last_tts_url) = x;'
                 - media_player.play_media:
