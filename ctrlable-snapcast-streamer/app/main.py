@@ -1,6 +1,7 @@
 """Ctrlable Snapcast TTS Streamer — FastAPI application."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -83,7 +84,7 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.22"  # keep in sync with config.yaml
+VERSION = "0.1.23"  # keep in sync with config.yaml
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 
@@ -170,21 +171,35 @@ async def health() -> dict:
 
 @app.get("/tts_proxy")
 async def tts_proxy(url: str = Query(...)) -> StreamingResponse:
-    """Fetch a TTS URL server-side and re-serve it over plain HTTP.
+    """Fetch a TTS URL server-side and re-serve as WAV (16 kHz mono PCM) over plain HTTP.
 
-    ESP32 devices call this instead of fetching the HTTPS TTS URL directly,
-    avoiding the ~80 KB TLS heap requirement that causes ESP_ERR_NO_MEM.
+    ESP32 devices call this instead of fetching the HTTPS TTS URL directly.
+    Two problems are avoided:
+      1. TLS heap exhaustion (~80 KB) — we fetch HTTPS server-side.
+      2. MP3 decoder heap exhaustion — we transcode to WAV so the ESP32 only
+         needs a trivial header-strip, not a full MP3 decoder.
     """
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="url must start with http:// or https://")
 
     async def _stream():
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            async with client.stream("GET", url) as resp:
-                async for chunk in resp.aiter_bytes(4096):
-                    yield chunk
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-tls_verify", "0",
+            "-i", url,
+            "-f", "wav", "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
+            "-",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            while chunk := await proc.stdout.read(4096):
+                yield chunk
+        finally:
+            with contextlib.suppress(Exception):
+                proc.kill()
+            await proc.wait()
 
-    return StreamingResponse(_stream(), media_type="audio/mpeg")
+    return StreamingResponse(_stream(), media_type="audio/wav")
 
 
 # ── Snapcast API endpoints (auth required) ─────────────────────────

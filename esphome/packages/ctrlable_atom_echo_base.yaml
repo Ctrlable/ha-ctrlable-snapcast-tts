@@ -81,7 +81,7 @@ media_player:
     internal: true
     announcement_pipeline:
       speaker: dummy_speaker
-      format: MP3
+      format: WAV
 
 micro_wake_word:
   id: mww
