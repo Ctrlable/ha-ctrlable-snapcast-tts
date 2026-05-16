@@ -1,12 +1,7 @@
 # Ctrlable Atom Echo — on-board speaker satellite
 #
-# Plays TTS through the built-in I2S speaker. Uses the add-on's /tts_proxy
-# endpoint (plain HTTP → FLAC) to avoid HTTPS/TLS heap exhaustion on ESP32.
-#
-# ESPHome 2026.4+ auto-routes the HTTPS TTS URL to any registered
-# speaker_media_player. The media_player on_state callback intercepts
-# the resulting ANNOUNCING transition and immediately replaces it with a
-# play_media call to the HTTP proxy before the TLS retry loop can spin up.
+# Plays TTS through the built-in I2S speaker. voice_assistant routes the
+# TTS URL directly to the local media_player component.
 #
 # Mute switch is exposed to HA: ON = wake word disabled, OFF = listening.
 #
@@ -14,12 +9,9 @@
 #   name:                  kebab-case device name
 #   friendly_name:         human-readable label
 #   micro_wake_word_model: e.g. okay_nabu, hey_jarvis
-#   addon_http_url:        add-on base URL over plain HTTP, e.g.
-#                          http://192.168.1.10:8099  (REQUIRED for audio)
 
 substitutions:
   micro_wake_word_model: okay_nabu
-  addon_http_url: ""
 
 esphome:
   name: ${name}
@@ -51,10 +43,6 @@ ota:
 logger:
 
 globals:
-  - id: last_tts_url
-    type: std::string
-    restore_value: false
-    initial_value: '""'
   - id: current_wake_word
     type: std::string
     restore_value: false
@@ -93,25 +81,6 @@ media_player:
     announcement_pipeline:
       speaker: i2s_speaker
       format: FLAC
-    on_state:
-      # ESPHome 2026.4+ auto-routes the HTTPS TTS URL here. When ANNOUNCING
-      # fires and we have a pending URL, replace the HTTPS stream with the
-      # HTTP proxy stream (FLAC, no TLS) before the heap-exhaustion loop starts.
-      # Clearing last_tts_url inside the media_url lambda prevents the proxy's
-      # own ANNOUNCING from triggering this block again.
-      - if:
-          condition:
-            and:
-              - media_player.is_announcing:
-                  id: tts_media_player
-              - lambda: 'return !id(last_tts_url).empty() && !std::string("${addon_http_url}").empty();'
-          then:
-            - media_player.play_media:
-                id: tts_media_player
-                media_url: !lambda |-
-                  auto url = std::string("${addon_http_url}") + "/tts_proxy?url=" + id(last_tts_url);
-                  id(last_tts_url) = "";
-                  return url;
 
 micro_wake_word:
   id: mww
@@ -174,18 +143,11 @@ voice_assistant:
     gain_factor: 4
   micro_wake_word: mww
   use_wake_word: false
+  media_player: tts_media_player
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 4.0
   conversation_timeout: 40s
-
-  on_tts_end:
-    # Save the TTS URL so on_state can build the proxy URL when ANNOUNCING fires.
-    - if:
-        condition:
-          lambda: 'return !x.empty();'
-        then:
-          - lambda: 'id(last_tts_url) = x;'
 
   on_listening:
     - light.turn_on:
@@ -204,7 +166,6 @@ voice_assistant:
         brightness: 80%
 
   on_end:
-    - lambda: 'id(last_tts_url) = "";'
     - lambda: 'id(current_wake_word) = "";'
     - light.turn_on:
         id: status_led
@@ -212,8 +173,6 @@ voice_assistant:
         green: 100%
         blue: 0%
         brightness: 40%
-    # ANNOUNCING is set asynchronously after on_end fires. The delay lets the
-    # proxy swap complete before wait_until checks the state.
     - delay: 300ms
     - wait_until:
         condition:
@@ -230,7 +189,6 @@ voice_assistant:
           - micro_wake_word.start:
 
   on_error:
-    - lambda: 'id(last_tts_url) = "";'
     - lambda: 'id(current_wake_word) = "";'
     - light.turn_on:
         id: status_led
