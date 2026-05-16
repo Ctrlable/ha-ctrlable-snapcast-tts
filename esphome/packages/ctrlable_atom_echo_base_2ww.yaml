@@ -236,6 +236,11 @@ voice_assistant:
         green: 100%
         blue: 0%
         brightness: 40%
+    - if:
+        condition:
+          switch.is_on: local_speaker_switch
+        then:
+          - delay: 300ms
     - wait_until:
         condition:
           not:

@@ -236,11 +236,15 @@ voice_assistant:
         green: 100%
         blue: 0%
         brightness: 40%
-    # Wait for any in-progress announcement to finish before restarting wake
-    # word detection. A fixed delay is not enough — on_end fires when the HA
-    # pipeline ends, not when local or Snapcast playback is done. Starting
-    # micro_wake_word while the media pipeline holds TLS/heap memory causes
-    # ESP_ERR_NO_MEM and a 70-second deaf loop.
+    # In local speaker mode, media_player.play_media is called in on_tts_end but
+    # the ANNOUNCING state is set asynchronously (~50-100 ms later). on_end fires
+    # almost immediately after on_tts_end, so wait_until would find is_announcing=false
+    # and return before playback actually starts. The delay below bridges that gap.
+    - if:
+        condition:
+          switch.is_on: local_speaker_switch
+        then:
+          - delay: 300ms
     - wait_until:
         condition:
           not:
