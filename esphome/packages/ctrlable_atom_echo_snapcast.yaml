@@ -1,0 +1,222 @@
+# Ctrlable Atom Echo — Snapcast satellite
+#
+# Routes every TTS response to Snapcast via the ctrlable_snapcast_tts HA
+# service. No speaker or media_player components are registered, so
+# ESPHome never auto-routes TTS URLs locally — zero OOM loop.
+#
+# Mute switch is exposed to HA: ON = wake word disabled, OFF = listening.
+#
+# Required substitutions:
+#   name:                  kebab-case device name  (also used as satellite_id)
+#   friendly_name:         human-readable label
+#   micro_wake_word_model: e.g. okay_nabu, hey_jarvis
+
+substitutions:
+  micro_wake_word_model: okay_nabu
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: "2025.5.0"
+
+esp32:
+  board: m5stack-atom
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  ap:
+    ssid: "${friendly_name} Fb"
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+logger:
+
+globals:
+  - id: last_tts_url
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: current_wake_word
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: GPIO33
+    i2s_bclk_pin: GPIO19
+
+microphone:
+  - platform: i2s_audio
+    id: echo_microphone
+    i2s_audio_id: i2s_audio_bus
+    i2s_din_pin: GPIO23
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+    correct_dc_offset: true
+
+micro_wake_word:
+  id: mww
+  vad:
+  models:
+    - model: ${micro_wake_word_model}
+      id: wake_model
+  on_wake_word_detected:
+    - lambda: 'id(current_wake_word) = wake_word;'
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+switch:
+  - platform: template
+    id: mute_switch
+    name: "Mute"
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - micro_wake_word.stop:
+      - light.turn_on:
+          id: status_led
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 30%
+    on_turn_off:
+      - light.turn_off: status_led
+      - micro_wake_word.start:
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "Status LED"
+    internal: true
+    rgb_order: GRB
+    pin: GPIO27
+    num_leds: 1
+    chipset: SK6812
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO39
+      inverted: true
+    name: "Wake button"
+    on_press:
+      - if:
+          condition:
+            switch.is_off: mute_switch
+          then:
+            - micro_wake_word.stop:
+            - voice_assistant.start:
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: echo_microphone
+    gain_factor: 4
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  conversation_timeout: 40s
+
+  on_intent_progress:
+    - if:
+        condition:
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: 'id(last_tts_url) = x;'
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.announce
+              data:
+                url: !lambda 'return x;'
+                satellite_id: "${name}"
+                wake_word: !lambda 'return id(current_wake_word);'
+
+  on_tts_end:
+    - if:
+        condition:
+          lambda: 'return !x.empty() && x != id(last_tts_url);'
+        then:
+          - lambda: 'id(last_tts_url) = x;'
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.announce
+              data:
+                url: !lambda 'return x;'
+                satellite_id: "${name}"
+                wake_word: !lambda 'return id(current_wake_word);'
+
+  on_listening:
+    - light.turn_on:
+        id: status_led
+        red: 0%
+        green: 0%
+        blue: 100%
+        brightness: 80%
+
+  on_intent_start:
+    - light.turn_on:
+        id: status_led
+        red: 100%
+        green: 60%
+        blue: 0%
+        brightness: 80%
+
+  on_end:
+    - lambda: 'id(last_tts_url) = "";'
+    - lambda: 'id(current_wake_word) = "";'
+    - light.turn_on:
+        id: status_led
+        red: 0%
+        green: 100%
+        blue: 0%
+        brightness: 40%
+    - delay: 200ms
+    - light.turn_off: status_led
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_error:
+    - lambda: 'id(last_tts_url) = "";'
+    - lambda: 'id(current_wake_word) = "";'
+    - light.turn_on:
+        id: status_led
+        red: 100%
+        green: 0%
+        blue: 0%
+        brightness: 80%
+    - delay: 2s
+    - light.turn_off: status_led
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_client_connected:
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_client_disconnected:
+    - micro_wake_word.stop:
+    - voice_assistant.stop:

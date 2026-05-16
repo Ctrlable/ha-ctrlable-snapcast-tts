@@ -4,4 +4,4 @@ substitutions:
   micro_wake_word_model: okay_nabu
 
 packages:
-  ctrlable_base: !include ../ctrlable_atom_echo_base.yaml
+  ctrlable_base: !include ../ctrlable_atom_echo_snapcast.yaml

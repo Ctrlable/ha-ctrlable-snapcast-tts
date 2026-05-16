@@ -1,0 +1,258 @@
+# Ctrlable Atom Echo — on-board speaker satellite
+#
+# Plays TTS through the built-in I2S speaker. Uses the add-on's /tts_proxy
+# endpoint (plain HTTP → FLAC) to avoid HTTPS/TLS heap exhaustion on ESP32.
+#
+# ESPHome 2026.4+ auto-routes the HTTPS TTS URL to any registered
+# speaker_media_player. The media_player on_state callback intercepts
+# the resulting ANNOUNCING transition and immediately replaces it with a
+# play_media call to the HTTP proxy before the TLS retry loop can spin up.
+#
+# Mute switch is exposed to HA: ON = wake word disabled, OFF = listening.
+#
+# Required substitutions:
+#   name:                  kebab-case device name
+#   friendly_name:         human-readable label
+#   micro_wake_word_model: e.g. okay_nabu, hey_jarvis
+#   addon_http_url:        add-on base URL over plain HTTP, e.g.
+#                          http://192.168.1.10:8099  (REQUIRED for audio)
+
+substitutions:
+  micro_wake_word_model: okay_nabu
+  addon_http_url: ""
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: "2025.5.0"
+
+esp32:
+  board: m5stack-atom
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  ap:
+    ssid: "${friendly_name} Fb"
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+logger:
+
+globals:
+  - id: last_tts_url
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: current_wake_word
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: GPIO33
+    i2s_bclk_pin: GPIO19
+
+microphone:
+  - platform: i2s_audio
+    id: echo_microphone
+    i2s_audio_id: i2s_audio_bus
+    i2s_din_pin: GPIO23
+    adc_type: external
+    pdm: true
+    sample_rate: 16000
+    correct_dc_offset: true
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_audio_id: i2s_audio_bus
+    i2s_dout_pin: GPIO22
+    dac_type: external
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    channel: mono
+
+media_player:
+  - platform: speaker
+    id: tts_media_player
+    name: "TTS Output"
+    internal: true
+    announcement_pipeline:
+      speaker: i2s_speaker
+      format: FLAC
+    on_state:
+      # ESPHome 2026.4+ auto-routes the HTTPS TTS URL here. When ANNOUNCING
+      # fires and we have a pending URL, replace the HTTPS stream with the
+      # HTTP proxy stream (FLAC, no TLS) before the heap-exhaustion loop starts.
+      # Clearing last_tts_url inside the media_url lambda prevents the proxy's
+      # own ANNOUNCING from triggering this block again.
+      - if:
+          condition:
+            and:
+              - media_player.is_announcing:
+                  id: tts_media_player
+              - lambda: 'return !id(last_tts_url).empty() && !std::string("${addon_http_url}").empty();'
+          then:
+            - media_player.play_media:
+                id: tts_media_player
+                media_url: !lambda |-
+                  auto url = std::string("${addon_http_url}") + "/tts_proxy?url=" + id(last_tts_url);
+                  id(last_tts_url) = "";
+                  return url;
+
+micro_wake_word:
+  id: mww
+  vad:
+  models:
+    - model: ${micro_wake_word_model}
+      id: wake_model
+  on_wake_word_detected:
+    - lambda: 'id(current_wake_word) = wake_word;'
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+switch:
+  - platform: template
+    id: mute_switch
+    name: "Mute"
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - micro_wake_word.stop:
+      - light.turn_on:
+          id: status_led
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 30%
+    on_turn_off:
+      - light.turn_off: status_led
+      - micro_wake_word.start:
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "Status LED"
+    internal: true
+    rgb_order: GRB
+    pin: GPIO27
+    num_leds: 1
+    chipset: SK6812
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO39
+      inverted: true
+    name: "Wake button"
+    on_press:
+      - if:
+          condition:
+            switch.is_off: mute_switch
+          then:
+            - micro_wake_word.stop:
+            - voice_assistant.start:
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: echo_microphone
+    gain_factor: 4
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  conversation_timeout: 40s
+
+  on_tts_end:
+    # Save the TTS URL so on_state can build the proxy URL when ANNOUNCING fires.
+    - if:
+        condition:
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: 'id(last_tts_url) = x;'
+
+  on_listening:
+    - light.turn_on:
+        id: status_led
+        red: 0%
+        green: 0%
+        blue: 100%
+        brightness: 80%
+
+  on_intent_start:
+    - light.turn_on:
+        id: status_led
+        red: 100%
+        green: 60%
+        blue: 0%
+        brightness: 80%
+
+  on_end:
+    - lambda: 'id(last_tts_url) = "";'
+    - lambda: 'id(current_wake_word) = "";'
+    - light.turn_on:
+        id: status_led
+        red: 0%
+        green: 100%
+        blue: 0%
+        brightness: 40%
+    # ANNOUNCING is set asynchronously after on_end fires. The delay lets the
+    # proxy swap complete before wait_until checks the state.
+    - delay: 300ms
+    - wait_until:
+        condition:
+          not:
+            media_player.is_announcing:
+              id: tts_media_player
+        timeout: 30s
+    - delay: 200ms
+    - light.turn_off: status_led
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_error:
+    - lambda: 'id(last_tts_url) = "";'
+    - lambda: 'id(current_wake_word) = "";'
+    - light.turn_on:
+        id: status_led
+        red: 100%
+        green: 0%
+        blue: 0%
+        brightness: 80%
+    - delay: 2s
+    - light.turn_off: status_led
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_client_connected:
+    - if:
+        condition:
+          switch.is_off: mute_switch
+        then:
+          - micro_wake_word.start:
+
+  on_client_disconnected:
+    - micro_wake_word.stop:
+    - voice_assistant.stop:

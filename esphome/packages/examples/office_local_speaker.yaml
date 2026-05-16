@@ -1,0 +1,8 @@
+substitutions:
+  name: ctrlable-office
+  friendly_name: "Ctrlable Office"
+  micro_wake_word_model: okay_nabu
+  addon_http_url: "http://192.168.1.10:8099"  # replace with your HA LAN IP
+
+packages:
+  ctrlable_base: !include ../ctrlable_atom_echo_speaker.yaml
