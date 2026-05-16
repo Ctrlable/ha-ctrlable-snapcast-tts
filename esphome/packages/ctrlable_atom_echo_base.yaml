@@ -82,6 +82,22 @@ media_player:
     announcement_pipeline:
       speaker: dummy_speaker
       format: FLAC
+    on_state:
+      # ESPHome 2026.4+ auto-routes HTTPS TTS URL to any registered
+      # speaker_media_player even without media_player: in voice_assistant.
+      # React immediately when ANNOUNCING fires (rather than trying to
+      # preempt it before it starts, which races and always loses).
+      - if:
+          condition:
+            media_player.is_announcing:
+              id: tts_media_player
+          then:
+            - if:
+                condition:
+                  switch.is_off: local_speaker_switch
+                then:
+                  - media_player.stop:
+                      id: tts_media_player
 
 micro_wake_word:
   id: mww
