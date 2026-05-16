@@ -201,6 +201,8 @@ voice_assistant:
                       url: !lambda 'return x;'
                       satellite_id: "${name}"
                       wake_word: !lambda 'return id(current_wake_word);'
+          - media_player.stop:
+              id: tts_media_player
         else:
           - if:
               condition:
@@ -236,15 +238,19 @@ voice_assistant:
         green: 100%
         blue: 0%
         brightness: 40%
-    # In local speaker mode, media_player.play_media is called in on_tts_end but
-    # the ANNOUNCING state is set asynchronously (~50-100 ms later). on_end fires
-    # almost immediately after on_tts_end, so wait_until would find is_announcing=false
-    # and return before playback actually starts. The delay below bridges that gap.
     - if:
         condition:
           switch.is_on: local_speaker_switch
         then:
+          # media_player.play_media is called in on_tts_end but ANNOUNCING state
+          # is set asynchronously (~50-100 ms later); delay bridges that gap.
           - delay: 300ms
+        else:
+          # ESPHome 2026.4+ auto-routes the HTTPS TTS URL to the media player even
+          # when we omit media_player: from voice_assistant config. Stop it here so
+          # the TLS timeout loop (5 s × 6 = 30 s) does not block MWW restart.
+          - media_player.stop:
+              id: tts_media_player
     - wait_until:
         condition:
           not:
