@@ -65,7 +65,7 @@ speaker:
     dac_type: external
     bits_per_sample: 16bit
     sample_rate: 16000
-    channel: stereo
+    channel: mono
     buffer_duration: 60ms
 
 media_player:
@@ -276,11 +276,11 @@ voice_assistant:
           media_player.is_announcing:
             id: tts_media_player
         timeout: 0.5s
-    # In on-device MWW mode, wait for playback to finish before restarting
     - if:
         condition:
           lambda: 'return id(wake_word_engine).current_option() == "On device";'
         then:
+          # Wait for both pipeline and speaker to be idle before restarting MWW
           - wait_until:
               condition:
                 and:
@@ -292,6 +292,17 @@ voice_assistant:
               timeout: 30s
           - lambda: 'id(va).set_use_wake_word(false);'
           - micro_wake_word.start:
+        else:
+          # "In HA" mode: stop continuous listening while TTS plays to avoid concurrent
+          # DMA + API allocations that fragment the heap into OOM after a few sessions.
+          - voice_assistant.stop:
+          - wait_until:
+              condition:
+                not:
+                  speaker.is_playing:
+                    id: i2s_speaker
+              timeout: 30s
+          - voice_assistant.start_continuous:
     - script.execute: reset_led
 
   on_error:
