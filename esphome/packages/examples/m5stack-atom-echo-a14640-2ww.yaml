@@ -1,6 +1,7 @@
-# Example: two wake words routing to different rooms
-# okay_nabu  → Living Room snapclient
-# hey_jarvis → Master Bedroom snapclient
+# DEPRECATED — ctrlable_atom_echo_base_2ww.yaml is no longer maintained.
+# For Snapcast routing use ctrlable_atom_echo_snapcast.yaml with a single
+# micro_wake_word_model substitution (e.g. okay_nabu or hey_jarvis).
+
 substitutions:
   name: m5stack-atom-echo-a14640
   friendly_name: "Living Room Satellite"

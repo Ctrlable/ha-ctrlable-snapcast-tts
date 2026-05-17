@@ -1,0 +1,7 @@
+substitutions:
+  name: m5stack-atom-echo-a14640
+  friendly_name: "Living Room Satellite"
+  micro_wake_word_model: okay_nabu
+
+packages:
+  ctrlable_base: !include ../ctrlable_atom_echo_snapcast.yaml
