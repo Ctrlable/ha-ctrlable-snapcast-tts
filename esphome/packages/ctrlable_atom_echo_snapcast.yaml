@@ -4,7 +4,10 @@
 # service. No speaker or media_player components are registered, so
 # ESPHome never auto-routes TTS URLs locally — zero OOM loop.
 #
-# Mute switch is exposed to HA: ON = wake word disabled, OFF = listening.
+# Wake word engine is configurable from HA at runtime via the
+# "Wake word engine" select:
+#   On device   — micro_wake_word (low-latency, no cloud)
+#   In HA       — Home Assistant cloud / on-server wake word
 #
 # Required substitutions:
 #   name:                  kebab-case device name  (also used as satellite_id)
@@ -73,40 +76,38 @@ micro_wake_word:
   vad:
   models:
     - model: ${micro_wake_word_model}
-      id: wake_model
   on_wake_word_detected:
     - lambda: 'id(current_wake_word) = wake_word;'
     - voice_assistant.start:
         wake_word: !lambda return wake_word;
 
-switch:
-  - platform: template
-    id: mute_switch
-    name: "Mute"
-    icon: "mdi:microphone-off"
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    on_turn_on:
-      - micro_wake_word.stop:
-      - light.turn_on:
-          id: status_led
-          red: 100%
-          green: 0%
-          blue: 0%
-          brightness: 30%
-    on_turn_off:
-      - light.turn_off: status_led
-      - micro_wake_word.start:
+button:
+  - platform: factory_reset
+    name: "Factory reset"
 
 light:
   - platform: esp32_rmt_led_strip
     id: status_led
-    name: "Status LED"
+    name: None
     internal: true
     rgb_order: GRB
     pin: GPIO27
     num_leds: 1
     chipset: SK6812
+    default_transition_length: 0s
+    effects:
+      - pulse:
+          name: "Slow Pulse"
+          transition_length: 250ms
+          update_interval: 250ms
+          min_brightness: 50%
+          max_brightness: 100%
+      - pulse:
+          name: "Fast Pulse"
+          transition_length: 100ms
+          update_interval: 100ms
+          min_brightness: 50%
+          max_brightness: 100%
 
 binary_sensor:
   - platform: gpio
@@ -115,12 +116,112 @@ binary_sensor:
       inverted: true
     name: "Wake button"
     on_press:
+      - script.execute: start_wake_word
+
+switch:
+  - platform: template
+    id: use_listen_light
+    name: "Use listen light"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - script.execute: reset_led
+    on_turn_off:
+      - script.execute: reset_led
+
+select:
+  - platform: template
+    id: wake_word_engine
+    name: "Wake word engine"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - On device
+      - In Home Assistant
+    initial_option: On device
+    on_value:
       - if:
           condition:
-            switch.is_off: mute_switch
+            lambda: 'return x == "In Home Assistant";'
           then:
             - micro_wake_word.stop:
-            - voice_assistant.start:
+            - delay: 500ms
+            - lambda: 'id(va).set_use_wake_word(true);'
+            - voice_assistant.start_continuous:
+      - if:
+          condition:
+            lambda: 'return x == "On device";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - voice_assistant.stop:
+            - delay: 500ms
+            - micro_wake_word.start:
+
+script:
+  - id: reset_led
+    then:
+      - if:
+          condition:
+            switch.is_on: use_listen_light
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(wake_word_engine).current_option() == "On device";'
+                then:
+                  - light.turn_on:
+                      id: status_led
+                      red: 100%
+                      green: 89%
+                      blue: 71%
+                      brightness: 60%
+                      effect: none
+                else:
+                  - light.turn_on:
+                      id: status_led
+                      red: 0%
+                      green: 100%
+                      blue: 100%
+                      brightness: 60%
+                      effect: none
+          else:
+            - light.turn_off: status_led
+
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: 'return id(wake_word_engine).current_option() == "On device";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - micro_wake_word.start:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: 'return id(wake_word_engine).current_option() == "In Home Assistant";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(true);'
+            - voice_assistant.start_continuous:
+
+  - id: stop_wake_word
+    then:
+      - if:
+          condition:
+            lambda: 'return id(wake_word_engine).current_option() == "In Home Assistant";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: 'return id(wake_word_engine).current_option() == "On device";'
+          then:
+            - micro_wake_word.stop:
 
 voice_assistant:
   id: va
@@ -163,35 +264,34 @@ voice_assistant:
   on_listening:
     - light.turn_on:
         id: status_led
+        blue: 100%
         red: 0%
         green: 0%
-        blue: 100%
-        brightness: 80%
+        effect: "Slow Pulse"
 
-  on_intent_start:
+  on_stt_vad_end:
     - light.turn_on:
         id: status_led
-        red: 100%
-        green: 60%
-        blue: 0%
-        brightness: 80%
+        blue: 100%
+        red: 0%
+        green: 0%
+        effect: "Fast Pulse"
+
+  on_tts_start:
+    - light.turn_on:
+        id: status_led
+        blue: 100%
+        red: 0%
+        green: 0%
+        brightness: 100%
+        effect: none
 
   on_end:
     - lambda: 'id(last_tts_url) = "";'
     - lambda: 'id(current_wake_word) = "";'
-    - light.turn_on:
-        id: status_led
-        red: 0%
-        green: 100%
-        blue: 0%
-        brightness: 40%
     - delay: 200ms
-    - light.turn_off: status_led
-    - if:
-        condition:
-          switch.is_off: mute_switch
-        then:
-          - micro_wake_word.start:
+    - script.execute: reset_led
+    - script.execute: start_wake_word
 
   on_error:
     - lambda: 'id(last_tts_url) = "";'
@@ -201,22 +301,15 @@ voice_assistant:
         red: 100%
         green: 0%
         blue: 0%
-        brightness: 80%
+        brightness: 100%
+        effect: none
     - delay: 2s
-    - light.turn_off: status_led
-    - if:
-        condition:
-          switch.is_off: mute_switch
-        then:
-          - micro_wake_word.start:
+    - script.execute: reset_led
+    - script.execute: start_wake_word
 
   on_client_connected:
-    - if:
-        condition:
-          switch.is_off: mute_switch
-        then:
-          - micro_wake_word.start:
+    - delay: 2s
+    - script.execute: start_wake_word
 
   on_client_disconnected:
-    - micro_wake_word.stop:
-    - voice_assistant.stop:
+    - script.execute: stop_wake_word
