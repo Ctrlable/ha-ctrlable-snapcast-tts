@@ -53,9 +53,13 @@ substitutions:
   # satellite_id sent to the add-on. MUST match a mapping registered at
   # POST /mappings, or every announce returns 404 "Satellite has no mapping".
   snapcast_satellite_id: cores3-va-e39e44
-  # Safety net only. The add-on knows the true duration, but nothing reports it
-  # back yet, so this caps how long the device can sit in "replying" if the
-  # finish signal never arrives. See the note in announce_and_wait.
+  # Completion signal. The integration holds this ON for exactly the span of the
+  # announce, and the add-on only returns once playback has finished -- so its
+  # ON->OFF edge is the real end-of-playback moment. Entity id is derived from
+  # the satellite_id by HA's slugify.
+  snapcast_announcing_entity: binary_sensor.cores3_va_e39e44_announcing
+  # Backstop only, for when HA is unreachable or the entity does not exist yet
+  # (older integration build). Never the normal path.
   announce_max_wait: 25s
 
   # Add support for non-unicode characters by using better glyphs
@@ -293,6 +297,23 @@ binary_sensor:
       then:
         - logger.log: "AW88298 interrupt triggered"
     internal: true
+
+  # --- Ctrlable Snapcast routing ---
+  # Mirrors the integration's per-satellite announcing sensor. ESPHome cannot
+  # subscribe to HA events, only entity state, which is why the integration
+  # exposes this as an entity rather than relying on its EVENT_ANNOUNCED.
+  - platform: homeassistant
+    id: snapcast_announcing
+    entity_id: ${snapcast_announcing_entity}
+    internal: true
+    on_release:
+      # ON -> OFF means the room has stopped talking. Guarded because this also
+      # fires when the entity first reports its (off) state at startup.
+      - if:
+          condition:
+            lambda: return id(responding);
+          then:
+            - script.execute: finish_response
 
 audio_adc:
   - platform: es7210
@@ -795,11 +816,15 @@ script:
             url: !lambda return id(last_tts_url);
             satellite_id: "${snapcast_satellite_id}"
             wake_word: !lambda return id(current_wake_word);
+      # Normal path is snapcast_announcing going ON then OFF above. This only
+      # fires if that never arrives -- HA down, integration too old to expose
+      # the entity, or the sensor wedged ON.
       - delay: ${announce_max_wait}
       - if:
           condition:
             lambda: return id(responding);
           then:
+            - logger.log: "announce completion signal never arrived; releasing on backstop"
             - script.execute: finish_response
 
   # The single place an exchange ends once an answer was routed to Snapcast.

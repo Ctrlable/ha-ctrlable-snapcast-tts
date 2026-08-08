@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import (
     AddonApiClient,
@@ -15,7 +16,7 @@ from .api import (
     NoMatchingMappingError,
     SatelliteNotMappedError,
 )
-from .const import DOMAIN, EVENT_ANNOUNCED
+from .const import DOMAIN, EVENT_ANNOUNCED, SIGNAL_ANNOUNCING, SIGNAL_NEW_SATELLITE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +74,13 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
                 "ctrlable_snapcast_tts.announce: provide satellite_id or target_snapclient_ids"
             )
             return
+        # Hold the satellite's "announcing" sensor ON for exactly the span of the
+        # call. announce_by_satellite awaits playback, so switching it off in the
+        # finally IS the end-of-playback signal a Snapcast-routed device needs.
+        # try/finally, not try/except: every error path below returns early, and
+        # a sensor stuck ON would leave that satellite wedged in "replying".
+        async_dispatcher_send(hass, SIGNAL_NEW_SATELLITE, satellite_id)
+        async_dispatcher_send(hass, SIGNAL_ANNOUNCING.format(satellite_id), True)
         try:
             results = await client.announce_by_satellite(satellite_id, wake_word, url, source_host)
         except SatelliteNotMappedError:
@@ -96,6 +104,8 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
         except Exception as exc:
             _LOGGER.error("ctrlable_snapcast_tts: announce failed — %s", exc)
             return
+        finally:
+            async_dispatcher_send(hass, SIGNAL_ANNOUNCING.format(satellite_id), False)
 
         hass.bus.async_fire(
             EVENT_ANNOUNCED,

@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .api import AddonApiClient
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN
+from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, PLATFORMS
 from .services import (
     ANNOUNCE_SCHEMA,
     SET_MAPPING_SCHEMA,
@@ -36,11 +36,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "set_mapping", partial(handle_set_mapping, hass), schema=SET_MAPPING_SCHEMA
     )
 
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     hass.data[DOMAIN].pop(entry.entry_id, None)
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, "announce")

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.25] — 2026-08-08
+
+### Added
+- **`binary_sensor.<satellite_id>_announcing`** — ON for exactly the span of an
+  announce. Because the add-on awaits playback before returning, its ON→OFF edge
+  is the moment the answer actually stopped playing in the room.
+- ESPHome config for the M5Stack CoreS3 (`esphome/cores3-va-e39e44.yaml`), built
+  as m5stack's official satellite base plus a marked Snapcast-routing diff, so
+  the display, touchscreen and per-phase conversation UX are all retained.
+
+### Fixed
+- **Satellites that route audio to Snapcast no longer get stuck in the wrong
+  state.** They had no way to learn when their answer finished: `on_end` fires
+  when the *pipeline* ends, which is before playback begins, so the device went
+  idle and resumed its wake word while the reply was still coming out of the
+  speakers next to its microphone. `EVENT_ANNOUNCED` already marked the right
+  moment, but ESPHome can only mirror entity state — it cannot subscribe to HA
+  events — hence the new binary_sensor.
+- `handle_announce` now clears the announcing state in a `finally`, so none of
+  the five early-return error paths can leave a satellite latched in "replying".
+
 ## [0.1.0] — 2026-05-13
 
 ### Added (M3 — HA Custom Integration)
