@@ -1,0 +1,345 @@
+# Ctrlable M5Stack CoreS3 — Snapcast satellite
+#
+# Port of ctrlable_atom_echo_snapcast.yaml to the CoreS3. The BEHAVIOUR is
+# unchanged and deliberately so; only the hardware layer differs.
+#
+# THE RULE THAT MUST SURVIVE THE PORT
+# -----------------------------------
+# No `speaker:` and no `media_player:` are registered. That is not an omission.
+# With either present, ESPHome auto-routes the TTS URL to the local device and
+# the Atom hit an OOM loop. Here it would also defeat the entire point: the
+# answer is supposed to come out of the room's real speakers via Snapcast, not
+# a device driver. The CoreS3 has a proper DAC and it is tempting to "just add
+# the speaker back" -- don't, unless you also drop the Snapcast routing.
+#
+# Consequently the aw88298 DAC is NOT configured either. Add it (and the
+# external_component) only if you deliberately want local playback.
+#
+# WHY on_intent_progress AND on_tts_end
+# -------------------------------------
+# on_intent_progress delivers the TTS URL EARLY, while the response is still
+# streaming -- that is what makes the reply feel immediate instead of waiting
+# for synthesis to finish. on_tts_end is the fallback for pipelines that never
+# emit progress, deduplicated against last_tts_url so a normal exchange fires
+# the announce exactly once.
+#
+# HARDWARE DIFFERENCES FROM THE ATOM
+#   mic      PDM on GPIO23           -> I2S GPIO14 behind an ES7210 ADC on I2C
+#   i2s      lrclk 33, bclk 19       -> lrclk 33, bclk 34, mclk 0
+#   power    always on               -> AXP2101 PMIC. WITHOUT IT THE MIC IS DEAD.
+#   gpio     direct                  -> AW9523B expander
+#   status   SK6812 on GPIO27        -> none; CoreS3 has a 320x240 display
+#   button   GPIO39                  -> none; touch panel / PMIC
+#
+# Required substitutions:
+#   name:                  kebab-case device name (also used as satellite_id)
+#   friendly_name:         human-readable label
+#   micro_wake_word_model: e.g. okay_nabu, hey_jarvis
+
+substitutions:
+  micro_wake_word_model: okay_nabu
+  snapcast_addon_url: "http://10.1.8.23:8099"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: "2025.5.0"
+
+# ---------------------------------------------------------------------------
+# COPY THESE THREE BLOCKS VERBATIM from
+#   github://m5stack/esphome-yaml/common/cores3-satellite-base.yaml
+# I have not reproduced them because getting the board variant, PSRAM mode or
+# the I2C pins subtly wrong produces a device that boots and then fails in
+# ways that look like audio bugs:
+#
+#   esp32:      board / framework / flash + partition settings
+#   psram:      mode and speed
+#   i2c:        the `bsp_bus` bus (sda/scl pins, frequency)
+#
+# Everything below this line is reproduced exactly from the official base or
+# ported from the Atom package.
+# ---------------------------------------------------------------------------
+
+external_components:
+  # aw88298 (the DAC) is deliberately absent -- see the header. Add it only if
+  # you are also adding a speaker, which would break Snapcast routing.
+  - source: github://m5stack/esphome-yaml/components
+    components: [axp2101, aw9523b]
+    refresh: 0s
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  ap:
+    ssid: "${friendly_name} Fb"
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+logger:
+
+# Direct HTTP to the add-on, NOT homeassistant.service.
+#
+# homeassistant.service is fire-and-forget: ESPHome sends it and returns, so the
+# device never learns when the answer finished playing. It went idle instantly,
+# restarted the wake word while the reply was still coming out of the room
+# speakers -- so the answer could re-trigger it -- and HA showed the satellite
+# idle mid-response. That is the "satellite stuck in the wrong state" bug.
+#
+# /announce/by_satellite AWAITS playback and returns the duration, so the reply
+# to this POST *is* the completion signal. timeout must exceed the longest
+# plausible answer or a long reply looks like a failure.
+http_request:
+  id: http_client
+  timeout: 60s
+  verify_ssl: false
+
+# The PMIC. Nothing audio works without it -- the ES7210's rail is switched here.
+axp2101:
+  id: axp2101_pmu
+  i2c_id: bsp_bus
+
+aw9523b:
+  id: aw9523b_hub
+  i2c_id: bsp_bus
+  p0_drive_mode: PUSH_PULL
+
+globals:
+  # Dedupe: on_intent_progress and on_tts_end can both carry the same URL for
+  # one exchange, and announcing twice plays the answer twice in the room.
+  - id: last_tts_url
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  # Carried into the announce so the add-on can map wake-word -> target zone.
+  - id: current_wake_word
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  # True from the moment we hand the answer to the add-on until the add-on says
+  # playback finished. Everything that must not happen mid-answer keys off this.
+  - id: responding
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+i2s_audio:
+  id: i2s_audio_bus
+  i2s_lrclk_pin: GPIO33
+  i2s_bclk_pin: GPIO34
+  i2s_mclk_pin:
+    number: GPIO0
+    ignore_strapping_warning: true
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: bsp_bus
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    mic_gain: 36
+
+microphone:
+  - platform: i2s_audio
+    id: echo_microphone
+    i2s_din_pin: GPIO14
+    adc_type: external
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    i2s_audio_id: i2s_audio_bus
+
+micro_wake_word:
+  id: mww
+  vad:
+  models:
+    - model: ${micro_wake_word_model}
+  on_wake_word_detected:
+    - lambda: 'id(current_wake_word) = wake_word;'
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+button:
+  - platform: factory_reset
+    name: "Factory reset"
+
+select:
+  - platform: template
+    id: wake_word_engine
+    name: "Wake word engine"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    options:
+      - On device
+      - In Home Assistant
+    initial_option: On device
+    on_value:
+      - if:
+          condition:
+            lambda: 'return x == "In Home Assistant";'
+          then:
+            - micro_wake_word.stop:
+            - delay: 500ms
+            - lambda: 'id(va).set_use_wake_word(true);'
+            - voice_assistant.start_continuous:
+      - if:
+          condition:
+            lambda: 'return x == "On device";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - voice_assistant.stop:
+            - delay: 500ms
+            - micro_wake_word.start:
+
+script:
+  # reset_led and use_listen_light are GONE, not stubbed: the CoreS3 has no
+  # addressable LED. Every call site below was removed to match. If you want
+  # status feedback, the display is the equivalent and it is new code, not a
+  # port -- keep it out of this file until it is written.
+  # Hand the answer to the add-on and WAIT for it to say playback finished.
+  # mode: restart so a second progress event supersedes an in-flight request
+  # rather than stacking two announces of the same reply.
+  - id: announce_and_wait
+    mode: restart
+    then:
+      - lambda: 'id(responding) = true;'
+      # Stop listening while the room is talking. Without this the answer comes
+      # out of the very speakers next to the mic and can re-trigger the wake
+      # word -- the satellite interrupts itself.
+      - script.execute: stop_wake_word
+      - http_request.post:
+          url: ${snapcast_addon_url}/announce/by_satellite
+          headers:
+            Content-Type: application/json
+            # Full header value, i.e. "Bearer <token>". Keep it in secrets.yaml;
+            # it is the same shared token every satellite uses.
+            Authorization: !secret snapcast_addon_auth
+          json: |-
+            root["satellite_id"] = "${name}";
+            root["url"] = id(last_tts_url);
+            root["wake_word"] = id(current_wake_word);
+            root["source_host"] = "${name}";
+          on_response:
+            then:
+              # Only reached once the add-on has finished playing, which is the
+              # completion signal the device previously never received.
+              - script.execute: finish_response
+          on_error:
+            then:
+              - logger.log: "snapcast announce failed -- releasing state anyway"
+              - script.execute: finish_response
+
+  # Single place where an exchange actually ends. Anything that clears state or
+  # resumes listening belongs here, not in on_end.
+  - id: finish_response
+    then:
+      - lambda: |-
+          id(responding) = false;
+          id(last_tts_url) = "";
+          id(current_wake_word) = "";
+      - script.execute: start_wake_word
+
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: 'return id(wake_word_engine).current_option() == "On device";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - micro_wake_word.start:
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: 'return id(wake_word_engine).current_option() == "In Home Assistant";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(true);'
+            - voice_assistant.start_continuous:
+
+  - id: stop_wake_word
+    then:
+      - if:
+          condition:
+            lambda: 'return id(wake_word_engine).current_option() == "In Home Assistant";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: 'return id(wake_word_engine).current_option() == "On device";'
+          then:
+            - micro_wake_word.stop:
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: echo_microphone
+    # gain_factor 4 was compensating for the Atom's PDM mic. The ES7210 already
+    # applies mic_gain: 36 in hardware, so start at 1 and only raise it if STT
+    # is actually weak -- stacking both is how you get clipping that reads as
+    # bad recognition.
+    gain_factor: 1
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  conversation_timeout: 40s
+
+  on_intent_progress:
+    - if:
+        condition:
+          lambda: 'return !x.empty() && x != id(last_tts_url);'
+        then:
+          - lambda: 'id(last_tts_url) = x;'
+          - script.execute: announce_and_wait
+
+  on_tts_end:
+    - if:
+        condition:
+          lambda: 'return !x.empty() && x != id(last_tts_url);'
+        then:
+          - lambda: 'id(last_tts_url) = x;'
+          - script.execute: announce_and_wait
+
+  # on_end fires when the PIPELINE finishes, which with Snapcast routing is
+  # BEFORE the answer has played a single sample. Clearing state or resuming the
+  # wake word here is exactly what left the satellite in the wrong state. Only
+  # act if no announce is outstanding -- e.g. "nevermind", where there is no
+  # reply to wait for.
+  on_end:
+    - if:
+        condition:
+          lambda: 'return !id(responding);'
+        then:
+          - delay: 200ms
+          - script.execute: start_wake_word
+
+  on_error:
+    - if:
+        condition:
+          lambda: 'return !id(responding);'
+        then:
+          - lambda: |-
+              id(last_tts_url) = "";
+              id(current_wake_word) = "";
+          - delay: 2s
+          - script.execute: start_wake_word
+
+  on_client_connected:
+    - delay: 2s
+    - script.execute: start_wake_word
+
+  on_client_disconnected:
+    - script.execute: stop_wake_word
