@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.29] — 2026-08-08
+
+### Added
+- **`POST /prewarm`** — the endpoint every LVA satellite has been calling since
+  it was written, and which never existed. Each satellite 404'd, retried six
+  times with back-off, logged `prewarm failed after retries` and gave up: ~25s
+  per satellite per boot, and the format cache stayed cold so the first announce
+  after any restart paid `detect_format` on the critical path. Pass
+  `satellite_id` to warm the cache for its mapped clients; without it the call
+  still validates the URL and reports format and duration.
+
+### Fixed
+- `probe_duration` logs why it failed instead of returning a bare `0.0`. An
+  unreachable URL was indistinguishable from a broken probe — a dead test server
+  read as "ffprobe is failing" while ffprobe was saying "Connection refused"
+  into `DEVNULL`.
+
 ## [0.1.28] — 2026-08-08
 
 ### Fixed

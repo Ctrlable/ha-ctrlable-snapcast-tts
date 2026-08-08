@@ -48,6 +48,8 @@ from streamer import (
     NotProvisionedError,
     announce,
     announce_multi,
+    detect_format,
+    probe_duration,
 )
 from watchdog import run_watchdog
 
@@ -287,6 +289,56 @@ class AnnounceMultiBody(BaseModel):
     client_ids: list[str]
     url: str
     source_host: str
+
+
+class PrewarmBody(BaseModel):
+    url: str
+    satellite_id: str | None = None
+    source_host: str = "prewarm"
+
+
+@app.post("/prewarm", dependencies=[Depends(require_auth)])
+async def api_prewarm(body: PrewarmBody) -> dict:
+    """Warm the format cache for a URL the satellite will use repeatedly.
+
+    Every LVA satellite has POSTed here on startup since it was written, and this
+    endpoint did not exist -- each one 404'd, retried six times with back-off,
+    logged "prewarm failed after retries" and gave up, ~25s per satellite per
+    boot. The consequence was silent: the format cache stayed cold, so the FIRST
+    announce after any restart paid detect_format on the critical path.
+
+    Pass satellite_id to warm the cache for the clients it maps to. Without it
+    this still validates the URL and reports what it found, which is the other
+    half of what a prewarm is for.
+    """
+    state = get_state()
+    fmt = await detect_format(body.url)
+    dur = await probe_duration(body.url)
+
+    warmed: list[str] = []
+    if body.satellite_id:
+        try:
+            targets = _resolve_mapping(state.mappings, body.satellite_id, None)
+        except (SatelliteNotMappedError, NoMatchingMappingError):
+            targets = []
+        for cid in targets:
+            cs = state.clients.get(cid)
+            if cs is not None:
+                cs.format_cache[body.source_host] = fmt
+                warmed.append(cid)
+        if warmed:
+            save_state()
+
+    _LOGGER.info(
+        "Prewarm %s -> format=%s duration=%.2fs, warmed %d client(s)",
+        body.url, fmt, dur, len(warmed),
+    )
+    return {
+        "url": body.url,
+        "format": fmt,
+        "audio_duration": round(dur, 3),
+        "warmed": warmed,
+    }
 
 
 @app.post("/announce", dependencies=[Depends(require_auth)])

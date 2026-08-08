@@ -77,11 +77,23 @@ async def probe_duration(url: str) -> float:
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", url,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        return max(0.0, float(out.decode().strip()))
-    except Exception:  # noqa: BLE001 - unknown length is not fatal, just degrades
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=10)
+        text = out.decode().strip()
+        if not text:
+            # Returning a bare 0.0 made an UNREACHABLE URL indistinguishable from
+            # a broken probe. That cost real debugging time on 2026-08-08: a dead
+            # test server read as "ffprobe is failing" when ffprobe was fine and
+            # saying "Connection refused" into a DEVNULL.
+            _LOGGER.warning(
+                "ffprobe gave no duration for %s (exit %s): %s",
+                url, proc.returncode, err.decode(errors="replace").strip()[:300] or "<no stderr>",
+            )
+            return 0.0
+        return max(0.0, float(text))
+    except Exception as exc:  # noqa: BLE001 - unknown length degrades, never fatal
+        _LOGGER.warning("ffprobe failed for %s: %s", url, exc)
         return 0.0
 
 

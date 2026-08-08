@@ -1,7 +1,7 @@
 ---
 substitutions:
-  name: cores3-va
-  friendly_name: M5Stack CoreS3 Voice Assistant
+  name: cores3-va-e39e44
+  friendly_name: M5Stack CoreS3 Voice Assistant e39e4
 
   # Casita images
   loading_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/loading_320_240.png
@@ -78,7 +78,7 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2026.1.0
-  name_add_mac_suffix: true
+  name_add_mac_suffix: false
   on_boot:
     - priority: 600
       then:
@@ -128,16 +128,24 @@ psram:
 
 # Enable Home Assistant API
 api:
+  encryption:
+    key: /5jWV/v8fsARJGhs5Hy9VyD5Ljm1rCFm48elbU56bbc=
+
   on_client_connected:
     - script.execute: draw_display
   on_client_disconnected:
     - script.execute: draw_display
+
+
 
 ota:
   - platform: esphome
     id: ota_esphome
 
 wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
   on_connect:
