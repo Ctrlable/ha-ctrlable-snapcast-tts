@@ -1,0 +1,27 @@
+<svg height="230" width="270" viewBox="0 0 55 42" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#00b3cd;}</style></defs>
+  
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <circle fill="#ffffff" r="4.2" cy="16.5" cx="15"></circle>
+  <circle fill="#00b3cd" r="2.3" cy="16.5" cx="15"></circle>
+  
+  
+  <circle fill="#ffffff" r="4" cy="16.5" cx="29"></circle>
+  <circle fill="#00b3cd" r="2.2" cy="16.5" cx="29"></circle>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.2" stroke="#00b3cd" fill="none" d="M13.5 26 L 29.5 26"></path>
+  
+  <path stroke-linecap="round" stroke-width="2.4" stroke="#e74c3c" fill="none" d="M15 23 L 28.5 29"></path>
+  
+  
+  <path opacity="0.85" fill="#00b3cd" d="M39 12 L 39 22 L 42 22 L 46 19 L 46 15 L 42 12 Z"></path>
+  
+  <path opacity="0.6" stroke-linecap="round" stroke-width="1.4" stroke="#00b3cd" fill="none" d="M48 13 Q 50.5 14 52 13"></path>
+  <path opacity="0.6" stroke-linecap="round" stroke-width="1.4" stroke="#00b3cd" fill="none" d="M48 18 Q 51 19 52.5 18"></path>
+  
+  <path stroke-linecap="round" stroke-width="2.1" stroke="#e74c3c" fill="none" d="M38 11 L 49 24"></path>
+</svg>

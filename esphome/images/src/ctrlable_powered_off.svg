@@ -1,0 +1,18 @@
+<svg height="230" width="240" viewBox="0 0 40 38" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#555555;}</style></defs>
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.5" stroke="#666666" fill="none" d="M11 17 L 19 17"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.2" stroke="#666666" fill="none" d="M26 17 L 33 17"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3" stroke="#666666" fill="none" d="M13 26 L 29 26"></path>
+  
+  
+  <rect fill="#444444" rx="0.5" height="7" width="4" y="27" x="4"></rect>
+  <path stroke-linecap="round" stroke-width="2.5" stroke="#666666" fill="none" d="M6 34 Q 3 36 2 33"></path>
+</svg>

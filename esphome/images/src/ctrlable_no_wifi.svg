@@ -1,0 +1,27 @@
+<svg height="230" width="270" viewBox="0 0 55 42" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#00b3cd;}</style></defs>
+  
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <circle fill="#ffffff" r="4.2" cy="16.5" cx="15"></circle>
+  <circle fill="#00b3cd" r="2.3" cy="16.5" cx="15"></circle>
+  
+  
+  <circle fill="#ffffff" r="4" cy="16.5" cx="29"></circle>
+  <circle fill="#00b3cd" r="2.2" cy="16.5" cx="29"></circle>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.2" stroke="#00b3cd" fill="none" d="M13.5 26 L 29.5 26"></path>
+  
+  
+  
+  <path stroke-linecap="round" stroke-width="1.8" stroke="#777777" fill="none" d="M40 9 Q 45 4.5 50 9"></path>
+  <path stroke-linecap="round" stroke-width="1.7" stroke="#777777" fill="none" d="M41.5 13 Q 45.5 9.5 49 13"></path>
+  <path stroke-linecap="round" stroke-width="1.6" stroke="#777777" fill="none" d="M42.8 16.5 Q 45.5 14.5 48 16.5"></path>
+  <circle fill="#777777" r="1" cy="18.5" cx="45.5"></circle>
+  
+  
+  <path stroke-linecap="round" stroke-width="2.4" stroke="#e74c3c" fill="none" d="M38.5 7 L 51 21"></path>
+</svg>

@@ -1,0 +1,21 @@
+<svg height="230" width="270" viewBox="0 0 55 42" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#00b3cd;}</style></defs>
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <circle fill="#ffffff" r="4.2" cy="16.5" cx="15"></circle>
+  <circle fill="#00b3cd" r="2.3" cy="16.5" cx="15"></circle>
+  
+  
+  <circle fill="#ffffff" r="4" cy="16.5" cx="29"></circle>
+  <circle fill="#00b3cd" r="2.2" cy="16.5" cx="29"></circle>
+  
+  
+  <ellipse stroke-width="2.6" stroke="#00b3cd" fill="#ffffff" ry="6" rx="4.5" cy="26.5" cx="22"></ellipse>
+  
+  
+  <path stroke-linecap="round" stroke-width="1.8" stroke="#00b3cd" fill="none" d="M40 16 Q 44 13.5 48 16"></path>
+  <path stroke-linecap="round" stroke-width="1.7" stroke="#00b3cd" fill="none" d="M41 21 Q 46 18.5 49.5 21.5"></path>
+  <path stroke-linecap="round" stroke-width="1.6" stroke="#00b3cd" fill="none" d="M40.5 26 Q 45 24 48.5 26.5"></path>
+</svg>

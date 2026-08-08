@@ -3,15 +3,20 @@ substitutions:
   name: cores3-va-e39e44
   friendly_name: M5Stack CoreS3 Voice Assistant e39e4
 
-  # Casita images
-  loading_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/loading_320_240.png
-  idle_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/idle_320_240.png
-  listening_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/listening_320_240.png
-  thinking_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/thinking_320_240.png
-  replying_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/replying_320_240.png
-  error_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/casita/error_320_240.png
-  error_no_wifi_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/error_box_illustrations/error-no-wifi.png
-  error_no_ha_illustration_file: https://github.com/esphome/wake-word-voice-assistants/raw/main/error_box_illustrations/error-no-ha.png
+  # Ctrlable expression set. Rendered from ctrlable_logo_expressions/*.svg to
+  # 320x240 PNG with a TRANSPARENT ground and the art scaled to 190px tall --
+  # the thinking and replying pages overlay white text boxes at y=20..50 and
+  # y=190..220, so full-height art would be partly covered by them.
+  # Copy the PNGs to <esphome config dir>/images/.
+  loading_illustration_file: images/ctrlable_loading.png
+  idle_illustration_file: images/ctrlable_idle.png
+  listening_illustration_file: images/ctrlable_listening.png
+  thinking_illustration_file: images/ctrlable_thinking.png
+  replying_illustration_file: images/ctrlable_replying.png
+  error_illustration_file: images/ctrlable_alert.png
+  error_no_wifi_illustration_file: images/ctrlable_no_wifi.png
+  error_no_ha_illustration_file: images/ctrlable_no_ha_file.png
+  mute_illustration_file: images/ctrlable_mute.png
 
   # Fonts
   mdi_webfont_file: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf
@@ -27,9 +32,9 @@ substitutions:
 
   loading_illustration_background_color: '000000'
   idle_illustration_background_color: '000000'
-  listening_illustration_background_color: 'FFFFFF'
-  thinking_illustration_background_color: 'FFFFFF'
-  replying_illustration_background_color: 'FFFFFF'
+  listening_illustration_background_color: '000000'
+  thinking_illustration_background_color: '000000'
+  replying_illustration_background_color: '000000'
   error_illustration_background_color: '000000'
 
   # Phases of the Voice Assistant
@@ -750,7 +755,7 @@ display:
       - id: muted_page
         lambda: |-
           it.fill(Color::BLACK);
-          it.printf(96, 56, id(mdi_icon_128), Color::WHITE, "%s", "\U000F036D");
+          it.image((it.get_width() / 2), (it.get_height() / 2), id(ctrlable_muted), ImageAlign::CENTER);
 
 touchscreen:
   - platform: ft63x6
@@ -1011,6 +1016,13 @@ image:
     transparency: alpha_channel
   - file: ${error_no_ha_illustration_file}
     id: error_no_ha
+    resize: 320x240
+    type: RGB
+    transparency: alpha_channel
+  # --- Ctrlable: the mute page drew a generic MDI glyph; there is a real
+  # ctrlable_mute expression, so use it and keep the set coherent. ---
+  - file: ${mute_illustration_file}
+    id: ctrlable_muted
     resize: 320x240
     type: RGB
     transparency: alpha_channel

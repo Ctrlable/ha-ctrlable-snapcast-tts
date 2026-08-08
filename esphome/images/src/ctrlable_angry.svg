@@ -1,0 +1,16 @@
+<svg height="230" width="240" viewBox="0 0 40 38" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#00b3cd;}</style></defs>
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.8" stroke="#00b3cd" fill="none" d="M11 16 Q 16 18.5 20 15.5"></path>
+  <path stroke-linecap="round" stroke-width="3.6" stroke="#00b3cd" fill="none" d="M25 16 Q 30 18.5 34 15.2"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3" stroke="#00b3cd" fill="none" d="M10 10 L 20 12.5"></path>
+  <path stroke-linecap="round" stroke-width="2.9" stroke="#00b3cd" fill="none" d="M25 12.5 L 34.5 9.5"></path>
+  
+  
+  <path stroke-linecap="round" stroke-width="3.4" stroke="#00b3cd" fill="none" d="M13 26 Q 21 22.5 29 26"></path>
+</svg>

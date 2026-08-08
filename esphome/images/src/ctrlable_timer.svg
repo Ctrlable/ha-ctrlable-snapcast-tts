@@ -1,0 +1,28 @@
+<svg height="230" width="280" viewBox="0 0 58 42" xmlns="http://www.w3.org/2000/svg">
+  <defs><style>.cls-1{fill:#00b3cd;}</style></defs>
+  
+  
+  <path d="M35.14,3.7H3.7v30H35.14ZM1.85,0H37a1.85,1.85,0,0,1,1.85,1.85V35.57A1.85,1.85,0,0,1,37,37.42H1.85A1.85,1.85,0,0,1,0,35.57V1.85A1.85,1.85,0,0,1,1.85,0Z" class="cls-1"></path>
+  
+  
+  <circle fill="#ffffff" r="4.3" cy="16" cx="15"></circle>
+  <circle fill="#00b3cd" r="2.4" cy="16" cx="15"></circle>
+  
+  
+  <circle fill="#ffffff" r="4.1" cy="16" cx="29"></circle>
+  <circle fill="#00b3cd" r="2.3" cy="16" cx="29"></circle>
+  
+  
+  <path stroke-linecap="round" stroke-width="3" stroke="#00b3cd" fill="none" d="M14 25.5 Q 21 27.5 29 25.8"></path>
+  
+  
+  
+  <circle stroke-width="1.8" stroke="#00b3cd" fill="#ffffff" r="7.5" cy="13.5" cx="46"></circle>
+  
+  <path stroke-linecap="round" stroke-width="1.6" stroke="#00b3cd" fill="none" d="M46 13.5 L 46 8"></path> 
+  <path stroke-linecap="round" stroke-width="1.8" stroke="#00b3cd" fill="none" d="M46 13.5 L 50 16"></path> 
+  
+  
+  <circle fill="#00b3cd" r="0.7" cy="7" cx="46"></circle>
+  <circle fill="#00b3cd" r="0.7" cy="13.5" cx="52.5"></circle>
+</svg>
