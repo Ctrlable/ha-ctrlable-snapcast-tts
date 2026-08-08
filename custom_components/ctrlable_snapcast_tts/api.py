@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import httpx
 
+# announce() now blocks for the length of the clip -- it returns when playback
+# actually ends, which is the whole point. 30s would time out on any long reply.
+ANNOUNCE_TIMEOUT = 180
+
 
 class CannotConnectError(Exception):
     pass
@@ -38,7 +42,7 @@ class AddonApiClient:
 
     async def _post(self, path: str, body: dict) -> dict | list:
         try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            async with httpx.AsyncClient(verify=False, timeout=ANNOUNCE_TIMEOUT) as client:
                 resp = await client.post(
                     f"{self._url}{path}", json=body, headers=self._headers
                 )
@@ -77,7 +81,7 @@ class AddonApiClient:
         self, satellite_id: str, wake_word: str | None, url: str, source_host: str
     ) -> list[dict]:
         try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            async with httpx.AsyncClient(verify=False, timeout=ANNOUNCE_TIMEOUT) as client:
                 resp = await client.post(
                     f"{self._url}/announce/by_satellite",
                     json={"satellite_id": satellite_id, "wake_word": wake_word, "url": url, "source_host": source_host},

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26] — 2026-08-08
+
+### Fixed
+- **`/announce` now returns when playback actually ends, not when the push does.**
+  Measured: a 20-second clip pushed in 0.084s and the call returned in 1.6s
+  while the room played for the full 20 seconds. Neither streaming path is
+  rate-limited, so Snapcast buffers the whole clip and keeps playing long after
+  our socket closes — but every caller treats the return as "the answer
+  finished". That is how a voice satellite decides to stop showing "replying"
+  and resume its wake word, so satellites were going idle and listening again
+  while their own answer was still coming out of the speakers beside the mic.
+  `announce()` now probes the clip length with ffprobe and sleeps out the
+  remainder before returning. Capped at 300s so a mis-probed URL cannot pin a
+  client's lock.
+- Deliberately not fixed with `ffmpeg -re`: throttling the push to real time
+  would make streaming fragile to network hiccups. Filling Snapcast's buffer
+  fast is robust — push fast, return late.
+- `AnnounceResult.duration` is now total wall time (≈ end of playback) rather
+  than push time, and a new `audio_duration` reports the probed clip length.
+  Both surface in the `/announce*` responses.
+- Integration HTTP timeout 30s → 180s: announce calls now last as long as the
+  reply, and 30s would fail on any long answer.
+
+### Note
+This makes the `binary_sensor.<satellite>_announcing` sensor added in 0.1.25
+truthful. Before this change it went OFF ~1.6s into every answer.
+
 ## [0.1.25] — 2026-08-08
 
 ### Added

@@ -15,6 +15,9 @@ from state import get_state, save_state
 
 _LOGGER = logging.getLogger(__name__)
 _BUFFER_DRAIN = 1.5  # seconds after stream end before restoring group
+# Hard ceiling on how long announce() will block waiting out playback. A URL
+# that probes as an hour long must not pin a client's lock for an hour.
+_MAX_PLAYBACK_WAIT = 300.0
 _SILENCE_PADDING_MS = 300  # ms of silence prepended to every announcement
 _locks: dict[str, asyncio.Lock] = {}
 
@@ -34,8 +37,9 @@ def _lock(client_id: str) -> asyncio.Lock:
 @dataclass
 class AnnounceResult:
     client_id: str
-    duration: float
+    duration: float        # total wall time of the call ~= when playback ended
     fmt: str
+    audio_duration: float = 0.0   # probed length of the clip, 0.0 if unknown
 
 
 class ClientNotFoundError(KeyError):
@@ -59,6 +63,26 @@ async def detect_format(url: str) -> str:
     except Exception:
         return "other"
     return "pcm_wav" if any(x in ct for x in ("wav", "pcm", "x-wav")) else "other"
+
+
+async def probe_duration(url: str) -> float:
+    """Length of the audio in seconds, or 0.0 if it cannot be determined.
+
+    Not cached: TTS URLs are unique per utterance, so a cache would only grow.
+    ffprobe on a remote URL costs tens of milliseconds.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-tls_verify", "0",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return max(0.0, float(out.decode().strip()))
+    except Exception:  # noqa: BLE001 - unknown length is not fatal, just degrades
+        return 0.0
 
 
 async def _stream_pcm(url: str, host: str, port: int) -> None:
@@ -166,16 +190,51 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
                 save_state()
                 _LOGGER.info("Format detected for %r from %r: %r", client_id, source_host, fmt)
 
+            # Probed BEFORE the clock starts: this is our cost, not playback.
+            audio_duration = await probe_duration(tts_url)
+
             t0 = time.monotonic()
             host = state.snapcast.host
             if fmt == "pcm_wav":
                 await _stream_pcm(tts_url, host, cs.announce_port)
             else:
                 await _stream_ffmpeg(tts_url, host, cs.announce_port)
-            duration = time.monotonic() - t0
+            push = time.monotonic() - t0
 
-            _LOGGER.info("Announced to %r: %.2fs via %s", client_id, duration, fmt)
+            # THE PUSH IS NOT THE PLAYBACK.
+            #
+            # Neither streaming path is rate-limited, so we hand Snapcast the
+            # whole clip as fast as the network and decoder allow; it buffers
+            # everything and keeps playing long after our socket closes.
+            # Measured 2026-08-08: a 20s clip pushed in 0.084s and this call
+            # returned in 1.6s while the room played for the full 20s.
+            #
+            # Every caller treats this call returning as "the answer finished" --
+            # that is how a voice satellite knows to stop showing "replying" and
+            # resume its wake word. Returning early made satellites go idle and
+            # start listening while their own answer was still playing out of the
+            # speakers next to the microphone. So wait out the remainder.
+            #
+            # Deliberately NOT solved with `ffmpeg -re`: throttling the push to
+            # real time would make streaming vulnerable to any network hiccup,
+            # whereas filling Snapcast's buffer quickly is robust. Push fast,
+            # return late.
+            if audio_duration > 0:
+                remaining = min(audio_duration - push, _MAX_PLAYBACK_WAIT)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            else:
+                _LOGGER.warning(
+                    "Could not probe duration of %s - returning after the push, "
+                    "so callers may think playback ended early", tts_url,
+                )
+
             await asyncio.sleep(_BUFFER_DRAIN)
+            duration = time.monotonic() - t0
+            _LOGGER.info(
+                "Announced to %r: audio %.2fs, pushed in %.2fs, held %.2fs via %s",
+                client_id, audio_duration, push, duration, fmt,
+            )
         finally:
             if needs_restore and live_stream_id:
                 with contextlib.suppress(Exception):
@@ -185,7 +244,9 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
                         client_id, cs.announce_stream_id, live_stream_id,
                     )
 
-    return AnnounceResult(client_id=client_id, duration=duration, fmt=fmt)
+    return AnnounceResult(
+        client_id=client_id, duration=duration, fmt=fmt, audio_duration=audio_duration
+    )
 
 
 async def announce_multi(client_ids: list[str], tts_url: str, source_host: str) -> list[AnnounceResult]:
