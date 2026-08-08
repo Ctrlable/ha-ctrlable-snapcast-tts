@@ -84,9 +84,28 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-# Supplied by the add-on builder from config.yaml (see Dockerfile). The literal
-# fallback is only for running the app outside the add-on image.
-VERSION = os.environ.get("ADDON_VERSION") or "0.0.0-dev"
+def _read_version() -> str:
+    """The add-on version, from whichever source is actually populated.
+
+    ADDON_VERSION comes from BUILD_VERSION, which the published-add-on builder
+    passes but Supervisor's LOCAL build does not -- confirmed 2026-08-08 when it
+    arrived empty and the UI badge read 0.0.0-dev. config.yaml is copied into the
+    image precisely so there is a source that cannot go missing.
+    """
+    env = os.environ.get("ADDON_VERSION", "").strip()
+    if env:
+        return env
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as fh:
+            for line in fh:
+                if line.startswith("version:"):
+                    return line.split(":", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0-dev"
+
+
+VERSION = _read_version()
 
 # Every template gets it, so the badge can never drift from /status again.
 templates.env.globals["version"] = VERSION

@@ -20,6 +20,11 @@ RUN apk add --no-cache \
     python-multipart==0.0.9
 
 COPY app/ /app/
+# config.yaml goes INTO the image on purpose: Supervisor does not reliably pass
+# BUILD_VERSION for locally-built add-ons (observed 2026-08-08 -- ADDON_VERSION
+# came through empty and the UI fell back to 0.0.0-dev), so the app reads the
+# version straight out of it. Belt and braces, no build args required.
+COPY config.yaml /app/config.yaml
 COPY rootfs/ /
 
 WORKDIR /app

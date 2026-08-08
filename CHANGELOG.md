@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-08-08
+
+### Fixed
+- Version reporting again: 0.1.27 routed it through `BUILD_VERSION`, which the
+  published-add-on builder passes but Supervisor's **local** build does not, so
+  `ADDON_VERSION` arrived empty and the web UI showed the `0.0.0-dev` fallback.
+  `config.yaml` is now copied into the image and read at startup when the env
+  var is absent. Order is env → shipped `config.yaml` → `0.0.0-dev`, so there is
+  no build-arg dependency left.
+
 ## [0.1.27] — 2026-08-08
 
 ### Fixed
