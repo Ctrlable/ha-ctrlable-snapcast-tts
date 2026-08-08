@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.27] — 2026-08-08
+
+### Fixed
+- **One version string, not three.** `config.yaml` said 0.1.26, `/status` said
+  0.1.24 (a hardcoded `VERSION` in `main.py` marked "keep in sync" that wasn't),
+  and the web UI badge said 0.1.0 (hardcoded in `base.html` since day one). The
+  Dockerfile now takes `BUILD_VERSION` — which the add-on builder already passes
+  from `config.yaml` — into `ADDON_VERSION`, `main.py` reads it, and it is
+  injected into every template. `config.yaml` is the only place a version is
+  written. This also means `/status` is finally trustworthy for confirming what
+  is actually running.
+- CoreS3 config: corrected `snapcast_satellite_id` and the announcing entity id.
+  The satellite_id is the HA assist_satellite entity slug derived from the
+  FRIENDLY name, not the ESPHome device name — verified against the live add-on
+  as `m5stack-cores3-voice-assistant-e39e44-assist-satellite`. The previous value
+  would have 404'd on every announce.
+
 ## [0.1.26] — 2026-08-08
 
 ### Fixed

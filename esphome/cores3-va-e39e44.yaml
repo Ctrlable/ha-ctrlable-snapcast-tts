@@ -52,12 +52,19 @@ substitutions:
   # --- Ctrlable Snapcast routing -------------------------------------------
   # satellite_id sent to the add-on. MUST match a mapping registered at
   # POST /mappings, or every announce returns 404 "Satellite has no mapping".
-  snapcast_satellite_id: cores3-va-e39e44
+  #
+  # This is NOT the ESPHome device name. It is the slug of the HA
+  # assist_satellite entity the device registers as, which HA derives from the
+  # FRIENDLY name -- "M5Stack CoreS3 Voice Assistant" + the mac suffix -- and
+  # then suffixes with "-assist-satellite". Verified against the live add-on:
+  #   GET /mappings -> m5stack-cores3-voice-assistant-e39e44-assist-satellite
+  # Same shape as the LVA satellites (lva-family-room-assist-satellite).
+  snapcast_satellite_id: m5stack-cores3-voice-assistant-e39e44-assist-satellite
   # Completion signal. The integration holds this ON for exactly the span of the
   # announce, and the add-on only returns once playback has finished -- so its
   # ON->OFF edge is the real end-of-playback moment. Entity id is derived from
   # the satellite_id by HA's slugify.
-  snapcast_announcing_entity: binary_sensor.cores3_va_e39e44_announcing
+  snapcast_announcing_entity: binary_sensor.m5stack_cores3_voice_assistant_e39e44_assist_satellite_announcing
   # Backstop only, for when HA is unreachable or the entity does not exist yet
   # (older integration build). Never the normal path.
   announce_max_wait: 25s

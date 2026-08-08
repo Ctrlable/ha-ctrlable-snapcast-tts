@@ -84,7 +84,12 @@ templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 # ── In-memory activity log (last 100 entries) ─────────────────────
 
 _activity_log: list[dict] = []
-VERSION = "0.1.24"  # keep in sync with config.yaml
+# Supplied by the add-on builder from config.yaml (see Dockerfile). The literal
+# fallback is only for running the app outside the add-on image.
+VERSION = os.environ.get("ADDON_VERSION") or "0.0.0-dev"
+
+# Every template gets it, so the badge can never drift from /status again.
+templates.env.globals["version"] = VERSION
 
 # ── Degraded-mode flag ────────────────────────────────────────────
 

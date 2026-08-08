@@ -1,6 +1,13 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
+# The add-on builder passes the version from config.yaml as BUILD_VERSION.
+# Taking it from there makes config.yaml the ONE place a version is written --
+# previously main.py and the web UI each carried their own copy and both drifted
+# (config 0.1.26, /status 0.1.24, UI badge 0.1.0).
+ARG BUILD_VERSION
+ENV ADDON_VERSION=${BUILD_VERSION}
+
 RUN apk add --no-cache \
     ffmpeg \
     openssh-client \
