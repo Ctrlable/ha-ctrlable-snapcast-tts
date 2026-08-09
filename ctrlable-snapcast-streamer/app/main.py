@@ -524,8 +524,14 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
     # and an answer from the same satellite would fight over one cached format.
     src = f"chime:{body.chime}"
     try:
+        # hold_group: a chime is never the end of an exchange, so the group
+        # stays on the announcement stream until the ANSWER releases it. That is
+        # what stops music pumping between the wake chime, the thinking chime
+        # and the reply -- and makes the eventual restore a precise
+        # end-of-exchange signal for the host-side ducker.
         raw = await announce_multi(target_ids, str(path), src, body.volume,
-                                   silence_ms=_CHIME_SILENCE_PADDING_MS)
+                                   silence_ms=_CHIME_SILENCE_PADDING_MS,
+                                   hold_group=True)
         return [{"client_id": r.client_id, "duration": round(r.duration, 3),
                  "audio_duration": round(r.audio_duration, 3), "format": r.fmt} for r in raw]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:

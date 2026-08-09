@@ -250,10 +250,82 @@ async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None 
 # only: after a restart the first announce re-applies, which is harmless.
 _volume_cache: dict[str, int] = {}
 
+# Groups deliberately left switched to their announcement stream between the
+# announcements of one exchange, and the timer that guarantees they cannot stay
+# that way. client_id -> (live_stream_id_to_restore, asyncio.TimerHandle-ish task)
+#
+# WHY HOLD IT. Restoring the group after every announcement is what made music
+# pump: snapclient goes idle, closes its Pulse stream, module-role-ducking
+# unducks, then the next chime re-ducks. Measured 0.22s of full-volume music
+# between back-to-back announcements, and the whole chime/thinking/answer
+# sequence produced three duck cycles.
+#
+# It also delayed the un-duck: because snapclient holds its Pulse stream ~5s
+# past the audio, the host-side ducker could not tell "finished" from "idle" and
+# needed a linger on top. Holding the group means the restore itself IS the
+# end-of-exchange signal, and it lands ~1.2s after the last audio.
+#
+# THE RISK, and why the watchdog is not optional: an exchange that never
+# produces an answer (wake word into silence, HA error, device reboot mid-turn)
+# would leave the group pointed at a stream nobody is feeding -- that zone would
+# play no music at all until something else announced. The watchdog restores it
+# unconditionally.
+_sticky: dict[str, str] = {}
+_sticky_tasks: dict[str, asyncio.Task] = {}
+STICKY_TIMEOUT = 20.0
+
+
+async def _sticky_watchdog(client_id: str):
+    """Restore a held group if the exchange never finishes."""
+    try:
+        await asyncio.sleep(STICKY_TIMEOUT)
+    except asyncio.CancelledError:
+        return
+    # Never yank the group out from under an announcement that is mid-flight.
+    # The lock is held for the whole of announce(), so if it is taken the
+    # exchange is alive and this timeout is simply premature -- re-arm and let
+    # the answer release it normally. Without this a slow reply (longer than
+    # STICKY_TIMEOUT after the last chime) gets cut off by its own watchdog,
+    # which the sticky-group test caught on the first run.
+    if _lock(client_id).locked():
+        _LOGGER.debug("Sticky watchdog for %r deferred: announce in flight", client_id)
+        _sticky_tasks[client_id] = asyncio.create_task(_sticky_watchdog(client_id))
+        return
+
+    live = _sticky.pop(client_id, "")
+    _sticky_tasks.pop(client_id, None)
+    if not live:
+        return
+    state = get_state()
+    cs = state.clients.get(client_id)
+    if not cs:
+        return
+    _LOGGER.warning(
+        "Sticky group for %r never released after %ss -- restoring %r. An "
+        "exchange probably ended without an answer.", client_id, STICKY_TIMEOUT, live)
+    with contextlib.suppress(Exception):
+        await get_snap().set_group_stream(cs.announce_group_id, live)
+
+
+def _arm_sticky(client_id: str, live_stream_id: str):
+    _sticky[client_id] = live_stream_id
+    old = _sticky_tasks.get(client_id)
+    if old and not old.done():
+        old.cancel()
+    _sticky_tasks[client_id] = asyncio.create_task(_sticky_watchdog(client_id))
+
+
+def _disarm_sticky(client_id: str) -> str:
+    t = _sticky_tasks.pop(client_id, None)
+    if t and not t.done():
+        t.cancel()
+    return _sticky.pop(client_id, "")
+
 
 async def announce(
     client_id: str, tts_url: str, source_host: str, volume: int | None = None,
     drain: float | None = None, silence_ms: int | None = None,
+    hold_group: bool = False,
 ) -> AnnounceResult:
     state = get_state()
     cs = state.clients.get(client_id)
@@ -321,8 +393,18 @@ async def announce(
                     )
                 if grp:
                     live_stream_id = grp.stream_id
-                    if live_stream_id != cs.announce_stream_id:
+                    # A previous announcement in this exchange may have left the
+                    # group switched. In that case the group's CURRENT stream is
+                    # our announcement stream, not the music one -- remember the
+                    # real stream to go back to, or we would "restore" the group
+                    # to the announcement stream and strand it there.
+                    held = _sticky.get(client_id, "")
+                    if held:
+                        live_stream_id = held
+                    if grp.stream_id != cs.announce_stream_id:
                         await snap.set_group_stream(cs.announce_group_id, cs.announce_stream_id)
+                        needs_restore = True
+                    elif held:
                         needs_restore = True
                         _LOGGER.info(
                             "Switched %r stream %r → %r for announcement",
@@ -420,12 +502,22 @@ async def announce(
             )
         finally:
             if needs_restore and live_stream_id:
-                with contextlib.suppress(Exception):
-                    await snap.set_group_stream(cs.announce_group_id, live_stream_id)
+                if hold_group:
+                    # Leave it switched: another announcement in this exchange is
+                    # expected, and restoring now is what makes music pump.
+                    _arm_sticky(client_id, live_stream_id)
                     _LOGGER.info(
-                        "Restored %r stream %r → %r",
-                        client_id, cs.announce_stream_id, live_stream_id,
+                        "Holding %r on %r (will restore to %r); watchdog %ss",
+                        client_id, cs.announce_stream_id, live_stream_id, STICKY_TIMEOUT,
                     )
+                else:
+                    _disarm_sticky(client_id)
+                    with contextlib.suppress(Exception):
+                        await snap.set_group_stream(cs.announce_group_id, live_stream_id)
+                        _LOGGER.info(
+                            "Restored %r stream %r → %r",
+                            client_id, cs.announce_stream_id, live_stream_id,
+                        )
 
     return AnnounceResult(
         client_id=client_id, duration=duration, fmt=fmt, audio_duration=audio_duration
@@ -435,10 +527,12 @@ async def announce(
 async def announce_multi(
     client_ids: list[str], tts_url: str, source_host: str, volume: int | None = None,
     drain: float | None = None, silence_ms: int | None = None,
+    hold_group: bool = False,
 ) -> list[AnnounceResult]:
     """Announce to multiple clients in parallel; each client streams independently."""
     results = await asyncio.gather(
-        *(announce(cid, tts_url, source_host, volume, drain, silence_ms) for cid in client_ids),
+        *(announce(cid, tts_url, source_host, volume, drain, silence_ms, hold_group)
+          for cid in client_ids),
         return_exceptions=True,
     )
     out = []
