@@ -185,10 +185,6 @@ globals:
     initial_value: "false"
   # Volume to put back after the silent local playback. Seeded to the observed
   # default so the very first restore cannot land on zero.
-  - id: saved_volume
-    type: float
-    restore_value: no
-    initial_value: "0.61f"
   # on_intent_progress and on_tts_end can carry the same URL for one exchange;
   # announcing twice plays the answer twice in the room.
   - id: last_tts_url
@@ -472,18 +468,26 @@ micro_wake_word:
 voice_assistant:
   id: va
   microphone: i2s_mic
-  # RESTORED, with the speaker muted for the duration -- see on_tts_start.
+  # NO media_player HERE, and this is now an evidence-based decision rather
+  # than a guess.
   #
-  # Removing this stopped ESPHome playing TTS locally, which was the point. But
-  # it also removed the thing that reports "announcement finished" over the
-  # ESPHome API, and that is what HA's assist_satellite waits for to leave the
-  # `responding` state. Measured 2026-08-08: the announce played correctly in
-  # the room and the entity sat at `responding` indefinitely.
+  # With it present, ESPHome plays the TTS locally and reports "announcement
+  # finished" to HA, which is what lets assist_satellite leave `responding`.
+  # But the local copy CANNOT be silenced:
+  #   * m5stack's aw88298 set_mute_off() is a no-op, so the DAC mute is one-way
+  #     and would strand the device silent.
+  #   * media_player volume/mute does not apply to the ANNOUNCEMENT pipeline.
+  #     Measured 23:57:29 -- "PLAYING / Muted: YES" and the speaker then played
+  #     at full volume anyway. ESPHome plays announcements over the media
+  #     volume on purpose; that is the component's intent, not a bug.
   #
-  # So let ESPHome play it locally as upstream expects -- into a MUTED DAC. HA's
-  # state machine completes on real playback timing, the room hears Snapcast,
-  # and nothing audible comes out of the device.
-  media_player: va_media_player
+  # So the choice is: correct HA state with unmutable local audio, or silence
+  # with a stale entity. Audio blasting out of the device in the room you are
+  # standing in is a real defect; a stale entity is cosmetic, and subsequent
+  # wake words work regardless. Silence wins.
+  #
+  # The media_player COMPONENT stays defined, so wake / timer / error sounds
+  # still play locally -- only the assistant's auto-routing is disconnected.
   micro_wake_word: mww
   use_wake_word: false
   noise_suppression_level: 2
@@ -507,27 +511,6 @@ voice_assistant:
         state: !lambda return x;
     - script.execute: draw_display
   on_tts_start:
-    # Silence the local copy in SOFTWARE. ESPHome is about to play this through
-    # the speaker purely so HA gets its completion event; the audible answer is
-    # Snapcast's.
-    #
-    # NOT the DAC's mute. m5stack's aw88298 driver has two bugs that make it
-    # unusable here:
-    #   * set_mute_state_ sets is_muted_ BEFORE the I2C write, so is_muted()
-    #     reports success even when the write failed.
-    #   * set_mute_off() never clears the mute bit -- it just `return true`.
-    #     Mute is therefore ONE-WAY. Had it worked, the device would have been
-    #     permanently silent: no wake chime, no timer, nothing, until reboot.
-    # It also depends on the DAC answering on I2C, and 0x36 did not enumerate on
-    # the 23:38 boot at all. Volume is applied in ESPHome's own pipeline, so it
-    # needs no I2C and is reversible.
-    - lambda: |-
-        if (id(va_media_player)->volume > 0.01f) {
-          id(saved_volume) = id(va_media_player)->volume;
-        }
-    - media_player.volume_set:
-        id: va_media_player
-        volume: 0.0
     - text_sensor.template.publish:
         id: text_response
         state: !lambda return x;
@@ -836,23 +819,6 @@ script:
                 media_player.is_announcing:
             - not:
                 speaker.is_playing:
-    # Restore the volume HERE, and specifically not in start_wake_word.
-    #
-    # The media_player's own on_idle calls start_wake_word, and volume_set
-    # publishes a media_player state change -- so putting the restore there
-    # built an infinite loop: volume_set -> state change -> on_idle ->
-    # start_wake_word -> volume_set. Observed 23:47-23:48 as dozens of
-    # "IDLE / Volume: 61%" plus "Wake word detection is already running" per
-    # second, continuously. It also defeated the mute: on_tts_start set 0 and
-    # the loop immediately put it back to 0.61, which is why the answer played
-    # at full volume.
-    #
-    # This point is safe: it is past both wait_untils, so local playback has
-    # genuinely finished, and nothing here is reachable from a media_player
-    # state change.
-    - media_player.volume_set:
-        id: va_media_player
-        volume: !lambda return id(saved_volume);
     # Restart only mWW if enabled; streaming wake words automatically restart
     - if:
         condition:
