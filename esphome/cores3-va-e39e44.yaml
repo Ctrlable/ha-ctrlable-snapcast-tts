@@ -460,11 +460,18 @@ micro_wake_word:
 voice_assistant:
   id: va
   microphone: i2s_mic
-  # `media_player: va_media_player` REMOVED deliberately. With it present
-  # ESPHome plays the TTS on the device -- the one thing this config exists to
-  # avoid, since the answer belongs on the room's speakers via Snapcast. The
-  # media_player COMPONENT is kept, so wake / timer / error sounds still play
-  # locally; only the assistant's automatic routing is disconnected.
+  # RESTORED, with the speaker muted for the duration -- see on_tts_start.
+  #
+  # Removing this stopped ESPHome playing TTS locally, which was the point. But
+  # it also removed the thing that reports "announcement finished" over the
+  # ESPHome API, and that is what HA's assist_satellite waits for to leave the
+  # `responding` state. Measured 2026-08-08: the announce played correctly in
+  # the room and the entity sat at `responding` indefinitely.
+  #
+  # So let ESPHome play it locally as upstream expects -- into a MUTED DAC. HA's
+  # state machine completes on real playback timing, the room hears Snapcast,
+  # and nothing audible comes out of the device.
+  media_player: va_media_player
   micro_wake_word: mww
   use_wake_word: false
   noise_suppression_level: 2
@@ -488,6 +495,9 @@ voice_assistant:
         state: !lambda return x;
     - script.execute: draw_display
   on_tts_start:
+    # Silence the local copy. ESPHome is about to play this through the speaker
+    # purely so HA gets its completion event; the audible answer is Snapcast's.
+    - lambda: id(aw88298_dac)->set_mute_on();
     - text_sensor.template.publish:
         id: text_response
         state: !lambda return x;
@@ -912,6 +922,10 @@ script:
   # Starts either mWW or the streaming wake word, depending on the configured location
   - id: start_wake_word
     then:
+      # Unmute here rather than in on_end: every exit -- normal, error, backstop,
+      # client reconnect -- passes through this script, so the device cannot get
+      # stranded silent. Cheap and idempotent.
+      - lambda: id(aw88298_dac)->set_mute_off();
       - if:
           condition:
             and:
