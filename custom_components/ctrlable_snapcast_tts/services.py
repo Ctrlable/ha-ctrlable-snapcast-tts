@@ -39,6 +39,13 @@ CHIME_SCHEMA = vol.Schema(
     }
 )
 
+HOLD_SCHEMA = vol.Schema(
+    {
+        vol.Required("satellite_id"): cv.string,
+        vol.Optional("wake_word"): cv.string,
+    }
+)
+
 RELEASE_SCHEMA = vol.Schema(
     {
         vol.Required("satellite_id"): cv.string,
@@ -186,6 +193,22 @@ async def handle_chime(hass: HomeAssistant, call: ServiceCall) -> None:
         _LOGGER.warning("ctrlable_snapcast_tts: cannot reach add-on for chime")
     except Exception as exc:  # noqa: BLE001 - a missed chime must never break an exchange
         _LOGGER.warning("ctrlable_snapcast_tts: chime failed — %s", exc)
+
+
+async def handle_hold(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Duck the satellite's zone for the listening window.
+
+    Called on every on_listening, including follow-up turns of a continued
+    conversation -- which is the case the wake chime does not cover. Idempotent
+    and fire-and-forget; the answer or a release lets go.
+    """
+    client = _get_client(hass)
+    if client is None:
+        return
+    try:
+        await client.hold(call.data["satellite_id"], call.data.get("wake_word"))
+    except Exception as exc:  # noqa: BLE001 - never let this break an exchange
+        _LOGGER.debug("ctrlable_snapcast_tts: hold failed — %s", exc)
 
 
 async def handle_release(hass: HomeAssistant, call: ServiceCall) -> None:

@@ -80,6 +80,24 @@ chime:
           max: 100
           unit_of_measurement: "%"
 
+hold:
+  name: Hold zone
+  description: >-
+    Duck this satellite's zone while it listens, without playing anything.
+    Called on every listening window including follow-up turns of a continued
+    conversation, which the wake chime does not cover. Idempotent.
+  fields:
+    satellite_id:
+      name: Satellite identifier
+      required: true
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      required: false
+      selector:
+        text:
+
 release:
   name: Release zone
   description: >-

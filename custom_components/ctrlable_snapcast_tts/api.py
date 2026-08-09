@@ -129,6 +129,14 @@ class AddonApiClient:
         result = resp.json()
         return result if isinstance(result, list) else []
 
+    async def hold(self, satellite_id: str, wake_word: str | None) -> list[str]:
+        """Duck this satellite's zone while it listens, without playing audio."""
+        result = await self._post(
+            "/hold/by_satellite",
+            {"satellite_id": satellite_id, "wake_word": wake_word},
+        )
+        return (result or {}).get("held", []) if isinstance(result, dict) else []
+
     async def release(self, satellite_id: str, wake_word: str | None) -> list[str]:
         """Tell the add-on this satellite's exchange ended with no answer."""
         result = await self._post(

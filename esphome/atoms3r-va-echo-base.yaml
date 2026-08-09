@@ -321,6 +321,16 @@ voice_assistant:
   auto_gain: 31dBFS
   volume_multiplier: 2.0
   on_listening:
+    # --- Ctrlable Snapcast routing ---
+    # Hold the zone for the whole listening window. The wake chime covers the
+    # FIRST turn, but a continued conversation ("...and which room?") reopens
+    # the mic with NO chime, so nothing held the duck and music played at full
+    # volume straight into the microphone. Idempotent; the answer releases it.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.hold
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
   on_stt_vad_end:
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};

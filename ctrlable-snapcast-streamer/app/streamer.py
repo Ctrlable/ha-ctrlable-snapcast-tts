@@ -322,6 +322,48 @@ def _disarm_sticky(client_id: str) -> str:
     return _sticky.pop(client_id, "")
 
 
+async def hold_group(client_id: str) -> bool:
+    """Hold the zone without playing anything.
+
+    Ducking follows announce audio, so a follow-up turn in a continued
+    conversation had nothing holding it: the wake chime covers the FIRST turn,
+    but when the assistant answers with a question and reopens the mic there is
+    no chime, and music played at full volume straight into the microphone.
+
+    Switching the group is enough on its own -- the host-side ducker triggers on
+    `group.stream_id != IDLE_STREAM`, not on audio -- so this ducks the room
+    without emitting a sound. Idempotent: if the group is already held this only
+    re-arms the watchdog.
+    """
+    state = get_state()
+    cs = state.clients.get(client_id)
+    if cs is None or not cs.enabled or not cs.announce_stream_id:
+        return False
+    snap = get_snap()
+    async with _lock(client_id):
+        if client_id in _sticky:
+            _arm_sticky(client_id, _sticky[client_id])   # refresh the watchdog
+            return True
+        try:
+            groups = await snap.list_groups()
+            grp = next((g for g in groups if client_id in g.client_ids), None)
+            if grp is None:
+                return False
+            if grp.id != cs.announce_group_id:
+                cs.announce_group_id = grp.id
+                save_state()
+            if grp.stream_id == cs.announce_stream_id:
+                return True                              # already switched
+            await snap.set_group_stream(cs.announce_group_id, cs.announce_stream_id)
+            _arm_sticky(client_id, grp.stream_id)
+            _LOGGER.info("Holding %r on %r for listening (no audio)",
+                         client_id, cs.announce_stream_id)
+        except Exception as exc:                                 # noqa: BLE001
+            _LOGGER.warning("Could not hold group for %r: %s", client_id, exc)
+            return False
+    return True
+
+
 async def release_group(client_id: str) -> bool:
     """Restore a held group now, because the exchange ended without an answer.
 

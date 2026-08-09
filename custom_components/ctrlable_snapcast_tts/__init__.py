@@ -12,10 +12,12 @@ from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, PLATFORMS
 from .services import (
     ANNOUNCE_SCHEMA,
     CHIME_SCHEMA,
+    HOLD_SCHEMA,
     RELEASE_SCHEMA,
     SET_MAPPING_SCHEMA,
     handle_announce,
     handle_chime,
+    handle_hold,
     handle_release,
     handle_set_mapping,
 )
@@ -40,6 +42,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN, "chime", partial(handle_chime, hass), schema=CHIME_SCHEMA
     )
     hass.services.async_register(
+        DOMAIN, "hold", partial(handle_hold, hass), schema=HOLD_SCHEMA
+    )
+    hass.services.async_register(
         DOMAIN, "release", partial(handle_release, hass), schema=RELEASE_SCHEMA
     )
     hass.services.async_register(
@@ -59,6 +64,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.data[DOMAIN]:
         hass.services.async_remove(DOMAIN, "announce")
         hass.services.async_remove(DOMAIN, "chime")
+        hass.services.async_remove(DOMAIN, "hold")
         hass.services.async_remove(DOMAIN, "release")
         hass.services.async_remove(DOMAIN, "set_mapping")
     return True

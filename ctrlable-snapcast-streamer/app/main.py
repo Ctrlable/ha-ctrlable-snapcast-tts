@@ -45,6 +45,7 @@ from snapcast import (
 from state import ClientState, allocate_port, ensure_bearer_token, get_state, save_state
 from streamer import (
     _CHIME_SILENCE_PADDING_MS,
+    hold_group,
     release_group,
     ClientNotEnabledError,
     ClientNotFoundError,
@@ -544,6 +545,22 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
 class ReleaseBody(BaseModel):
     satellite_id: str
     wake_word: str | None = None
+
+
+@app.post("/hold/by_satellite", dependencies=[Depends(require_auth)])
+async def api_hold(body: ReleaseBody) -> dict:
+    """Duck this satellite's zone while it listens, without playing anything."""
+    state = get_state()
+    try:
+        target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
+    except (SatelliteNotMappedError, NoMatchingMappingError):
+        return {"held": []}
+    held = []
+    for cid in target_ids:
+        with contextlib.suppress(Exception):
+            if await hold_group(cid):
+                held.append(cid)
+    return {"held": held}
 
 
 @app.post("/release/by_satellite", dependencies=[Depends(require_auth)])
