@@ -15,12 +15,19 @@ from state import get_state, save_state
 
 _LOGGER = logging.getLogger(__name__)
 # Seconds to keep the group on the announcement stream after the last byte is
-# pushed. This is NOT slack -- it is what covers snapserver's ~1s output buffer.
-# Restore the group sooner than that and the audio is still queued when the
-# subscriber changes, so it is discarded and NOTHING PLAYS while every layer
-# reports success. Verified the hard way on 2026-08-09 with a 0.4s value.
-# Do not lower it below ~1.2s without re-measuring the server's buffer.
-_BUFFER_DRAIN = 1.5
+# pushed. This is NOT slack -- it is what covers snapserver's output buffer.
+# Restore the group sooner than the buffer and the audio is still queued when
+# the subscriber changes, so it is discarded and NOTHING PLAYS while every layer
+# reports success. Verified the hard way on 2026-08-09 with a 0.4s value against
+# a 1000ms buffer.
+#
+# THIS VALUE IS COUPLED TO SNAPSERVER'S CONFIG. On 2026-08-09 the announcement
+# instance was changed from the 1000ms default to:
+#     /etc/snapserver-announcement.conf (LXC 113)   buffer = 200
+# so 0.6s carries 3x margin. If that buffer is ever raised, RAISE THIS TOO or
+# chimes go silent again. It is only safe to be this small because announcements
+# run on their own snapserver instance, reached over a 10Gb/s host bridge.
+_BUFFER_DRAIN = 0.6
 # Hard ceiling on how long announce() will block waiting out playback. A URL
 # that probes as an hour long must not pin a client's lock for an hour.
 _MAX_PLAYBACK_WAIT = 300.0

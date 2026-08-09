@@ -31,13 +31,21 @@ substitutions:
   # snapclient via the add-on's bundled chimes -- which are the LVA satellites'
   # own awake.wav and done.wav, so the whole house answers in one voice.
 
-  # How long to hold the mic closed after the wake word. Nothing plays locally
-  # any more, so this is the whole gap, and it has to cover Snapcast's buffer
-  # (~1s) plus the chime itself (awake.wav is 0.40s) or the mic opens underneath
-  # its own chime coming back through the room. Measured: the chime becomes
-  # audible ~1.0s after the service call and ends ~1.4s. Lower it if the device
-  # feels sluggish; raise it if chime artefacts show up in transcriptions.
-  chime_lead_in: 1500ms
+  # How long to hold the mic closed after the wake word.
+  #
+  # Was 1500ms, which made the device feel dead -- you would start talking to the
+  # awake face before it was listening. That number existed to outlast
+  # snapserver's 1000ms buffer; the announcement instance now runs at 200ms
+  # (buffer = 200 in /etc/snapserver-announcement.conf on LXC 113), so the chime
+  # is audible ~0.45s after the wake word instead of ~1.5s and the long wait no
+  # longer buys anything.
+  #
+  # 250ms is essentially "immediately" -- just enough for the awake frame to
+  # paint. The chime now lands just AFTER the mic opens rather than before it,
+  # which is how every commercial assistant behaves. If chime artefacts start
+  # showing up at the start of transcriptions, raise this to ~700ms and the
+  # chime will finish before the mic opens again.
+  chime_lead_in: 250ms
 
   # Blank the screen after this long at rest. Touch or a wake word brings it
   # back. Only ever sleeps from idle/muted -- never mid-conversation.
