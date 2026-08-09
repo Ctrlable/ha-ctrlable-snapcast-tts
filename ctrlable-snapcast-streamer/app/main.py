@@ -44,6 +44,7 @@ from snapcast import (
 )
 from state import ClientState, allocate_port, ensure_bearer_token, get_state, save_state
 from streamer import (
+    _CHIME_SILENCE_PADDING_MS,
     ClientNotEnabledError,
     ClientNotFoundError,
     NotProvisionedError,
@@ -523,7 +524,8 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
     # and an answer from the same satellite would fight over one cached format.
     src = f"chime:{body.chime}"
     try:
-        raw = await announce_multi(target_ids, str(path), src, body.volume)
+        raw = await announce_multi(target_ids, str(path), src, body.volume,
+                                   silence_ms=_CHIME_SILENCE_PADDING_MS)
         return [{"client_id": r.client_id, "duration": round(r.duration, 3),
                  "audio_duration": round(r.audio_duration, 3), "format": r.fmt} for r in raw]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:

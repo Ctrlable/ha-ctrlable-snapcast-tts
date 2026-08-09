@@ -24,13 +24,20 @@ _BUFFER_DRAIN = 1.5
 # Hard ceiling on how long announce() will block waiting out playback. A URL
 # that probes as an hour long must not pin a client's lock for an hour.
 _MAX_PLAYBACK_WAIT = 300.0
-_SILENCE_PADDING_MS = 300  # ms of silence prepended to every announcement
+# Silence prepended to every announcement so the first syllable is not clipped
+# while the group settles on the new stream. It is also pure added latency --
+# every ms here delays the sound reaching the room -- so chimes use a shorter
+# one. An answer can afford 300ms of lead-in; a wake chime is feedback and its
+# whole value is being prompt.
+_SILENCE_PADDING_MS = 300
+_CHIME_SILENCE_PADDING_MS = 60
 _locks: dict[str, asyncio.Lock] = {}
 
 
-def _silence_pcm(sample_rate: int, channels: int, sample_width: int) -> bytes:
-    """Return silent PCM frames for _SILENCE_PADDING_MS at the given format."""
-    n_frames = int(sample_rate * _SILENCE_PADDING_MS / 1000)
+def _silence_pcm(sample_rate: int, channels: int, sample_width: int,
+                 padding_ms: int | None = None) -> bytes:
+    """Return silent PCM frames for the given padding at the given format."""
+    n_frames = int(sample_rate * (_SILENCE_PADDING_MS if padding_ms is None else padding_ms) / 1000)
     return bytes(n_frames * channels * sample_width)
 
 
@@ -156,7 +163,7 @@ async def _stream_pcm(url: str, host: str, port: int) -> None:
             await sock_writer.wait_closed()
 
 
-async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
+async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None = None) -> int:
     """Decode URL via ffmpeg → s16le 48 kHz stereo → Snapcast TCP source.
 
     Returns the PCM byte count, which is what tells us how long the audio is.
@@ -177,7 +184,7 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
     _, sock_writer = await asyncio.open_connection(host, port)
     written = 0
     try:
-        sock_writer.write(_silence_pcm(48000, 2, 2))
+        sock_writer.write(_silence_pcm(48000, 2, 2, silence_ms))
         await sock_writer.drain()
         assert proc.stdout is not None
         while chunk := await proc.stdout.read(4096):
@@ -214,7 +221,7 @@ _volume_cache: dict[str, int] = {}
 
 async def announce(
     client_id: str, tts_url: str, source_host: str, volume: int | None = None,
-    drain: float | None = None,
+    drain: float | None = None, silence_ms: int | None = None,
 ) -> AnnounceResult:
     state = get_state()
     cs = state.clients.get(client_id)
@@ -319,7 +326,7 @@ async def announce(
                 # We already decode to s16le 48kHz stereo, so the byte count IS
                 # the duration, exactly, with no second process and no
                 # dependency on what the server chose to advertise.
-                pcm = await _stream_ffmpeg(tts_url, host, cs.announce_port)
+                pcm = await _stream_ffmpeg(tts_url, host, cs.announce_port, silence_ms)
                 audio_duration = pcm / float(48000 * 2 * 2)
             push = time.monotonic() - t0
 
@@ -395,11 +402,11 @@ async def announce(
 
 async def announce_multi(
     client_ids: list[str], tts_url: str, source_host: str, volume: int | None = None,
-    drain: float | None = None,
+    drain: float | None = None, silence_ms: int | None = None,
 ) -> list[AnnounceResult]:
     """Announce to multiple clients in parallel; each client streams independently."""
     results = await asyncio.gather(
-        *(announce(cid, tts_url, source_host, volume, drain) for cid in client_ids),
+        *(announce(cid, tts_url, source_host, volume, drain, silence_ms) for cid in client_ids),
         return_exceptions=True,
     )
     out = []
