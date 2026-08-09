@@ -21,13 +21,26 @@ _LOGGER = logging.getLogger(__name__)
 # reports success. Verified the hard way on 2026-08-09 with a 0.4s value against
 # a 1000ms buffer.
 #
-# THIS VALUE IS COUPLED TO SNAPSERVER'S CONFIG. On 2026-08-09 the announcement
-# instance was changed from the 1000ms default to:
-#     /etc/snapserver-announcement.conf (LXC 113)   buffer = 200
-# so 0.6s carries 3x margin. If that buffer is ever raised, RAISE THIS TOO or
-# chimes go silent again. It is only safe to be this small because announcements
-# run on their own snapserver instance, reached over a 10Gb/s host bridge.
-_BUFFER_DRAIN = 0.6
+# THIS VALUE IS COUPLED TO SNAPSERVER'S CONFIG:
+#     /etc/snapserver-announcement.conf (LXC 113)   buffer = 400
+# 0.9s carries a bit over 2x margin. If that buffer is raised, RAISE THIS TOO.
+#
+# AND THERE IS A FLOOR ON THE BUFFER ITSELF, measured rather than guessed. 200ms
+# was tried on 2026-08-09 and produced total silence -- every layer reporting
+# success, nothing audible. The client said exactly why:
+#
+#     (Stream) outputBufferDacTime > bufferMs: 189 > 120
+#
+# PulseAudio's DAC latency on these clients is ~185-190ms, and snapclient
+# subtracts its own `--latency 80` from the server buffer, so buffer=200 left
+# 120ms to place chunks into and every one missed its deadline.
+#
+#     floor = PulseAudio DAC latency (~190ms) + client --latency (80ms) = ~270ms
+#
+# 400 sits above that with headroom for jitter. Do not go below ~350 without
+# re-measuring outputBufferDacTime on the actual clients -- and note the failure
+# is silent, so "it did not throw" is not evidence it worked.
+_BUFFER_DRAIN = 0.9
 # Hard ceiling on how long announce() will block waiting out playback. A URL
 # that probes as an hour long must not pin a client's lock for an hour.
 _MAX_PLAYBACK_WAIT = 300.0
