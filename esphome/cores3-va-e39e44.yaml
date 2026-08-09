@@ -7,16 +7,19 @@ substitutions:
   # 320x240 PNG with a TRANSPARENT ground and the art scaled to 190px tall --
   # the thinking and replying pages overlay white text boxes at y=20..50 and
   # y=190..220, so full-height art would be partly covered by them.
-  # Copy the PNGs to <esphome config dir>/images/.
-  loading_illustration_file: images/ctrlable_loading.png
-  idle_illustration_file: images/ctrlable_idle.png
-  listening_illustration_file: images/ctrlable_listening.png
-  thinking_illustration_file: images/ctrlable_thinking.png
-  replying_illustration_file: images/ctrlable_replying.png
-  error_illustration_file: images/ctrlable_alert.png
-  error_no_wifi_illustration_file: images/ctrlable_no_wifi.png
-  error_no_ha_illustration_file: images/ctrlable_no_ha_file.png
-  mute_illustration_file: images/ctrlable_mute.png
+  # Served from the public repo, the same way upstream references the Casita
+  # set -- so a rebuild needs no files in the ESPHome config directory and the
+  # HAOS VM never has to be touched. For an offline build, drop the PNGs in
+  # <esphome config dir>/images/ and change these back to images/<name>.png.
+  loading_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_loading.png
+  idle_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_idle.png
+  listening_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_listening.png
+  thinking_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_thinking.png
+  replying_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_replying.png
+  error_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_alert.png
+  error_no_wifi_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_no_wifi.png
+  error_no_ha_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_no_ha_file.png
+  mute_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_mute.png
 
   # Fonts
   mdi_webfont_file: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf

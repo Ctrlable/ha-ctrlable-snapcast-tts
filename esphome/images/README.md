@@ -1,8 +1,21 @@
 # Ctrlable expression set for the CoreS3 satellite
 
-`src/` holds the original SVGs. The PNGs beside it are what the firmware
-actually uses — **copy them to `<your esphome config dir>/images/`** so
-`file: images/ctrlable_*.png` resolves at compile time.
+`src/` holds the original SVGs. The PNGs beside it are what the firmware uses.
+
+**Nothing needs copying.** The config references them by raw URL from this public
+repo, the same way upstream references the Casita set, so a rebuild pulls them
+straight from GitHub and the HAOS VM never has to be touched:
+
+```
+https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/<name>.png
+```
+
+Two consequences worth knowing. The reference tracks `main`, so replacing a PNG
+here changes the display on the next rebuild — convenient, but it means a build
+is not reproducible against a moving branch; pin to a commit SHA in the URL if
+that matters. And a build needs internet: for an offline build, drop the PNGs in
+`<esphome config dir>/images/` and change the substitutions back to
+`images/<name>.png`.
 
 ## Why PNG and not the SVGs directly
 
