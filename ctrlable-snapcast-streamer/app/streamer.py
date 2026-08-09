@@ -54,8 +54,28 @@ class NotProvisionedError(ValueError):
     pass
 
 
+def _tls_args(url: str) -> list[str]:
+    """`-tls_verify 0` only where it is legal.
+
+    It is a protocol option, so ffmpeg/ffprobe accept it only when the input is
+    actually opened over TLS. Hand it a filesystem path -- which is how bundled
+    chimes arrive -- and it dies before reading a byte:
+        Option tls_verify not found.
+        Error opening input file sounds/wake_word_triggered.flac
+    The failure is silent from the caller's side: zero PCM bytes, zero duration,
+    announcement "succeeds", nothing plays. Caught on the bench 2026-08-09
+    before this shipped.
+    """
+    return ["-tls_verify", "0"] if url.startswith("https://") else []
+
+
 async def detect_format(url: str) -> str:
     """HEAD the URL; return 'pcm_wav' for WAV/PCM content, 'other' otherwise."""
+    # Bundled chimes come through here as filesystem paths. There is nothing to
+    # HEAD, and ffmpeg reads them directly, so say so rather than routing a local
+    # path into httpx just to catch the exception it raises.
+    if not url.startswith(("http://", "https://")):
+        return "other"
     try:
         async with httpx.AsyncClient(verify=False, timeout=10) as http:
             resp = await http.head(url)
@@ -73,7 +93,7 @@ async def probe_duration(url: str) -> float:
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-tls_verify", "0",
+            "ffprobe", "-v", "error", *_tls_args(url),
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", url,
             stdout=asyncio.subprocess.PIPE,
@@ -135,13 +155,18 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
 
     Returns the PCM byte count, which is what tells us how long the audio is.
     """
+    # stderr was DEVNULL, and that is how a decoder that never opened its input
+    # looked exactly like a successful announcement: no bytes, no duration, no
+    # complaint, every layer reporting OK. -loglevel error keeps the pipe to a
+    # few bytes in the normal case so reading it after the fact cannot deadlock.
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-tls_verify", "0",
+        "ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error",
+        *_tls_args(url),
         "-i", url,
         "-f", "s16le", "-ar", "48000", "-ac", "2",
         "-",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
     _, sock_writer = await asyncio.open_connection(host, port)
     written = 0
@@ -157,9 +182,21 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
         sock_writer.close()
         with contextlib.suppress(Exception):
             await sock_writer.wait_closed()
+        err = b""
+        with contextlib.suppress(Exception):
+            if proc.stderr is not None:
+                err = await proc.stderr.read()
         with contextlib.suppress(Exception):
             proc.kill()
         await proc.wait()
+
+    if written == 0:
+        # Loud, because the whole class of bug this add-on keeps producing is
+        # "reported success, nobody heard anything".
+        _LOGGER.error(
+            "ffmpeg decoded 0 bytes from %s (exit %s) — nothing was played: %s",
+            url, proc.returncode, err.decode(errors="replace").strip()[:300] or "<no stderr>",
+        )
     return written
 
 
