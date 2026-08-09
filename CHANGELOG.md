@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.30] — 2026-08-09
+
+### Fixed
+- **Playback duration is now measured from the PCM we push, not from ffprobe.**
+  ffprobe cannot measure a Home Assistant `tts_proxy` URL: HA serves those with
+  **no `Content-Length`**, and ffprobe returns `duration=N/A` for a headerless
+  MP3 stream. So every real answer probed as `0.0`, skipped the playback wait
+  added in 0.1.26, and returned in ~1.6s — while tests against static files,
+  which do have a length, passed. That is why it looked fixed.
+  We already decode to s16le/48k/stereo, so the byte count *is* the duration,
+  exactly, with no second process and no dependency on what the server
+  advertises.
+- Streaming behaviour is unchanged: bytes are counted inside the existing
+  chunked loop, so first audio still reaches Snapcast within milliseconds. Only
+  the HTTP response is delayed, so that "returned" means "the room stopped
+  talking".
+
 ## [0.1.29] — 2026-08-08
 
 ### Added

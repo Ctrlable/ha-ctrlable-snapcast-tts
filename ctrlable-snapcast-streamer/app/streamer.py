@@ -130,8 +130,11 @@ async def _stream_pcm(url: str, host: str, port: int) -> None:
             await sock_writer.wait_closed()
 
 
-async def _stream_ffmpeg(url: str, host: str, port: int) -> None:
-    """Decode URL via ffmpeg → s16le 48 kHz stereo → Snapcast TCP source."""
+async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
+    """Decode URL via ffmpeg → s16le 48 kHz stereo → Snapcast TCP source.
+
+    Returns the PCM byte count, which is what tells us how long the audio is.
+    """
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-tls_verify", "0",
         "-i", url,
@@ -141,6 +144,7 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     _, sock_writer = await asyncio.open_connection(host, port)
+    written = 0
     try:
         sock_writer.write(_silence_pcm(48000, 2, 2))
         await sock_writer.drain()
@@ -148,6 +152,7 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> None:
         while chunk := await proc.stdout.read(4096):
             sock_writer.write(chunk)
             await sock_writer.drain()
+            written += len(chunk)
     finally:
         sock_writer.close()
         with contextlib.suppress(Exception):
@@ -155,6 +160,7 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> None:
         with contextlib.suppress(Exception):
             proc.kill()
         await proc.wait()
+    return written
 
 
 async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceResult:
@@ -202,17 +208,46 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
                 save_state()
                 _LOGGER.info("Format detected for %r from %r: %r", client_id, source_host, fmt)
 
-            # Probed BEFORE the clock starts: this is our cost, not playback.
-            audio_duration = await probe_duration(tts_url)
-
             t0 = time.monotonic()
             host = state.snapcast.host
             if fmt == "pcm_wav":
                 await _stream_pcm(tts_url, host, cs.announce_port)
+                # No byte count on this path; fall back to probing the source.
+                audio_duration = await probe_duration(tts_url)
             else:
-                await _stream_ffmpeg(tts_url, host, cs.announce_port)
+                # Duration from the PCM WE PUSHED, not from ffprobe.
+                #
+                # ffprobe cannot measure a Home Assistant tts_proxy URL: HA
+                # serves those with NO Content-Length, and ffprobe returns
+                # duration=N/A for a headerless MP3 stream. Every real answer
+                # therefore probed as 0.0 and skipped the playback wait, while
+                # tests against static files (which do have a length) passed --
+                # which is exactly why this survived the first round of testing.
+                #
+                # We already decode to s16le 48kHz stereo, so the byte count IS
+                # the duration, exactly, with no second process and no
+                # dependency on what the server chose to advertise.
+                pcm = await _stream_ffmpeg(tts_url, host, cs.announce_port)
+                audio_duration = pcm / float(48000 * 2 * 2)
             push = time.monotonic() - t0
 
+            # WHAT THE WAIT BELOW DOES AND DOES NOT DELAY.
+            #
+            # This add-on streams: ffmpeg decodes in chunks and each 4096-byte
+            # block goes straight to Snapcast, so the room starts hearing the
+            # answer within milliseconds. That is the design and it is untouched
+            # -- the byte counter above rides along inside the same loop and
+            # buffers nothing.
+            #
+            # The wait delays only the HTTP RESPONSE to the caller, so that
+            # "this call returned" means "the room stopped talking". Playback
+            # latency is unchanged. Do not be tempted to "fix" the slow response
+            # by removing it; that is the bug, not the feature.
+            #
+            # It does hold this client's lock for the duration, which serialises
+            # back-to-back announcements to the same zone. That is correct for a
+            # speaker -- two answers should not overlap.
+            #
             # THE PUSH IS NOT THE PLAYBACK.
             #
             # Neither streaming path is rate-limited, so we hand Snapcast the
