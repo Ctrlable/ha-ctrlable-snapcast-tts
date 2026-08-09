@@ -23,7 +23,19 @@ _LOGGER = logging.getLogger(__name__)
 #
 # THIS VALUE IS COUPLED TO SNAPSERVER'S CONFIG:
 #     /etc/snapserver-announcement.conf (LXC 113)   buffer = 400
-# 0.9s carries a bit over 2x margin. If that buffer is raised, RAISE THIS TOO.
+# 1.2s. 0.9 was cut too fine and CLIPPED THE END OF ANSWERS: the drain has to
+# outlast the whole output chain, not just the server buffer --
+#
+#     snapserver buffer      400ms   (/etc/snapserver-announcement.conf)
+#     snapclient --latency    80ms
+#     PulseAudio DAC        ~190ms   (measured: outputBufferDacTime 185-190)
+#     ------------------------------
+#     real tail             ~670ms
+#
+# 0.9s left only ~230ms of margin, so ordinary jitter was enough to restore the
+# group's stream while the last syllable was still in flight. 1.2s restores the
+# ~500ms slack the original 1.5s/1000ms pairing had.
+# If that buffer is raised, RAISE THIS TOO.
 #
 # AND THERE IS A FLOOR ON THE BUFFER ITSELF, measured rather than guessed. 200ms
 # was tried on 2026-08-09 and produced total silence -- every layer reporting
@@ -40,7 +52,7 @@ _LOGGER = logging.getLogger(__name__)
 # 400 sits above that with headroom for jitter. Do not go below ~350 without
 # re-measuring outputBufferDacTime on the actual clients -- and note the failure
 # is silent, so "it did not throw" is not evidence it worked.
-_BUFFER_DRAIN = 0.9
+_BUFFER_DRAIN = 1.2
 # Hard ceiling on how long announce() will block waiting out playback. A URL
 # that probes as an hour long must not pin a client's lock for an hour.
 _MAX_PLAYBACK_WAIT = 300.0
