@@ -187,7 +187,35 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
         if cs.announce_group_id and cs.announce_stream_id:
             try:
                 groups = await snap.list_groups()
-                grp = next((g for g in groups if g.id == cs.announce_group_id), None)
+                # Find the group by MEMBERSHIP, not by the stored id.
+                #
+                # Snapserver regenerates group ids when it restarts, so a cached
+                # id goes stale on every reboot of the host. The old code matched
+                # on the stored id, found nothing, and SILENTLY skipped the stream
+                # switch -- then streamed the answer into the per-client
+                # announcement stream while the client was still listening to
+                # "Annoucements". Bytes sent, add-on reports success, nothing
+                # audible. Diagnosed 2026-08-09 after a host reboot:
+                #   stored  announce_group_id 9096e53b (gone)
+                #   actual  snapclient-announcement-6#16 in group daeb57f1
+                grp = next((g for g in groups if client_id in g.client_ids), None)
+                if grp is None:
+                    grp = next((g for g in groups if g.id == cs.announce_group_id), None)
+                if grp is not None and grp.id != cs.announce_group_id:
+                    _LOGGER.info(
+                        "Group id for %r changed %r -> %r (snapserver restart?); updating",
+                        client_id, cs.announce_group_id, grp.id,
+                    )
+                    cs.announce_group_id = grp.id
+                    save_state()
+                if grp is None:
+                    # Never silent again: this is the state that produced a
+                    # "successful" announce nobody could hear.
+                    _LOGGER.warning(
+                        "No snapcast group contains %r and stored group %r is gone -- "
+                        "streaming anyway, but nothing is subscribed so it will be inaudible",
+                        client_id, cs.announce_group_id,
+                    )
                 if grp:
                     live_stream_id = grp.stream_id
                     if live_stream_id != cs.announce_stream_id:

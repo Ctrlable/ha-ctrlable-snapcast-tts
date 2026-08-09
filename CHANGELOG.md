@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.31] — 2026-08-09
+
+### Fixed
+- **Announcements were silent after a snapserver restart.** Snapserver
+  regenerates group ids when it restarts, so the `announce_group_id` cached per
+  client goes stale on every host reboot. `announce()` matched on that stored
+  id, found nothing, and **silently skipped the stream switch** — then streamed
+  the answer into the per-client announcement stream while the client was still
+  subscribed to `Annoucements`. Bytes sent, add-on reported success, nothing
+  audible.
+  The group is now found by **membership** (which group currently contains this
+  client), the stored id is refreshed when it has changed, and the
+  no-group-found case logs a warning instead of failing quietly.
+
 ## [0.1.30] — 2026-08-09
 
 ### Fixed
