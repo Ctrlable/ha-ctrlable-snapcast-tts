@@ -183,6 +183,12 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  # Volume to put back after the silent local playback. Seeded to the observed
+  # default so the very first restore cannot land on zero.
+  - id: saved_volume
+    type: float
+    restore_value: no
+    initial_value: "0.61f"
   # on_intent_progress and on_tts_end can carry the same URL for one exchange;
   # announcing twice plays the answer twice in the room.
   - id: last_tts_url
@@ -373,7 +379,10 @@ media_player:
   - platform: speaker
     name: None
     id: va_media_player
-    volume_min: 0.5
+    # 0.0, not upstream's 0.5: volume_set(0) maps to volume_min, so at 0.5 the
+    # "silent" local copy would still play at half volume. It has to be genuinely
+    # inaudible -- see on_tts_start.
+    volume_min: 0.0
     volume_max: 0.8
     announcement_pipeline:
       speaker: i2s_speaker
@@ -498,9 +507,27 @@ voice_assistant:
         state: !lambda return x;
     - script.execute: draw_display
   on_tts_start:
-    # Silence the local copy. ESPHome is about to play this through the speaker
-    # purely so HA gets its completion event; the audible answer is Snapcast's.
-    - lambda: id(aw88298_dac)->set_mute_on();
+    # Silence the local copy in SOFTWARE. ESPHome is about to play this through
+    # the speaker purely so HA gets its completion event; the audible answer is
+    # Snapcast's.
+    #
+    # NOT the DAC's mute. m5stack's aw88298 driver has two bugs that make it
+    # unusable here:
+    #   * set_mute_state_ sets is_muted_ BEFORE the I2C write, so is_muted()
+    #     reports success even when the write failed.
+    #   * set_mute_off() never clears the mute bit -- it just `return true`.
+    #     Mute is therefore ONE-WAY. Had it worked, the device would have been
+    #     permanently silent: no wake chime, no timer, nothing, until reboot.
+    # It also depends on the DAC answering on I2C, and 0x36 did not enumerate on
+    # the 23:38 boot at all. Volume is applied in ESPHome's own pipeline, so it
+    # needs no I2C and is reversible.
+    - lambda: |-
+        if (id(va_media_player)->volume > 0.01f) {
+          id(saved_volume) = id(va_media_player)->volume;
+        }
+    - media_player.volume_set:
+        id: va_media_player
+        volume: 0.0
     - text_sensor.template.publish:
         id: text_response
         state: !lambda return x;
@@ -925,10 +952,12 @@ script:
   # Starts either mWW or the streaming wake word, depending on the configured location
   - id: start_wake_word
     then:
-      # Unmute here rather than in on_end: every exit -- normal, error, backstop,
-      # client reconnect -- passes through this script, so the device cannot get
-      # stranded silent. Cheap and idempotent.
-      - lambda: id(aw88298_dac)->set_mute_off();
+      # Restore volume here rather than in on_end: every exit -- normal, error,
+      # backstop, client reconnect -- passes through this script, so the device
+      # cannot get stranded silent. Cheap and idempotent.
+      - media_player.volume_set:
+          id: va_media_player
+          volume: !lambda return id(saved_volume);
       - if:
           condition:
             and:
