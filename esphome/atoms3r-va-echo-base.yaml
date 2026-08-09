@@ -1,0 +1,718 @@
+---
+substitutions:
+  name: atoms3r-with-echo-base
+  friendly_name: AtomS3R Echo Base Voice Assistant
+
+  # --- Ctrlable Snapcast routing -------------------------------------------
+  # Derived from m5stack/esphome-yaml common/atom-echos3r-satellite-base.yaml,
+  # with the Snapcast edits inlined rather than layered as a package: the
+  # routing has to modify existing automations (on_end, on_announcement), and
+  # package merging APPENDS to those lists rather than replacing them.
+  #
+  # satellite_id is the slug of the assist_satellite entity this device
+  # registers as, NOT the ESPHome node name. Confirmed live in HA:
+  #   assist_satellite.atoms3r_echo_base_voice_assistant_assist_satellite
+  # It must have a mapping in the add-on (Mappings page) or every announce
+  # returns 404. The TARGET ZONE IS NOT IN THIS FILE -- the device only ever
+  # sends its own id, and the add-on decides where the audio goes, so moving
+  # this satellite to another room is a mapping change, not a reflash.
+  snapcast_satellite_id: atoms3r-echo-base-voice-assistant-assist-satellite
+  snapcast_announcing_entity: binary_sensor.atoms3r_echo_base_voice_assistant_assist_satellite_announcing
+  # Backstop only, for when HA is unreachable or the integration is too old to
+  # expose the completion sensor. Never the normal path.
+  announce_max_wait: 25s
+  # Mic opens this long after the wake word. The chime is audible in the room
+  # ~0.45s after the service call (add-on overhead + 60ms padding + the
+  # announcement snapserver's 400ms buffer), so at 250ms the mic opens first and
+  # the chime lands during listening -- deliberate, matches the CoreS3.
+  chime_lead_in: 250ms
+
+  # Audio files
+  wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+  timer_finished_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+  error_cloud_expired_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
+  # Micro wake word models
+  okay_nabu_model_file: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+  stop_model_file: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+
+  # Phases of the Voice Assistant
+  # The voice assistant is ready to be triggered by a wake word
+  voice_assist_idle_phase_id: "1"
+  # The voice assistant is listening for a voice command
+  voice_assist_listening_phase_id: "2"
+  # The voice assistant is currently processing the command
+  voice_assist_thinking_phase_id: "3"
+  # The voice assistant is replying to the command
+  voice_assist_replying_phase_id: "4"
+  # The voice assistant is not ready
+  voice_assist_not_ready_phase_id: "10"
+  # The voice assistant encountered an error
+  voice_assist_error_phase_id: "11"
+  # Muted phase
+  voice_assist_muted_phase_id: "12"
+  # Finished timer phase
+  voice_assist_timer_finished_phase_id: "20"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  # false, matching the existing config. The device is already registered in
+  # HA as atoms3r_echo_base_voice_assistant_* -- turning the mac suffix on
+  # would rename every entity and break snapcast_satellite_id below.
+  name_add_mac_suffix: false
+  min_version: 2026.1.0
+  on_boot:
+    priority: 600
+    then:
+      - delay: 30s
+      - if:
+          condition:
+            lambda: return id(init_in_progress);
+          then:
+            - lambda: id(init_in_progress) = false;
+            
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    ## Note: Disable these configurations if you face the boot loop issue.
+    sdkconfig_options:
+        CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+        CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+        CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: cZJki8fLvf68lfxeP0Uij5OgtqTBDCUcWgnYNP3A510=
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+
+captive_portal:
+
+
+logger:
+  level: DEBUG
+
+button:
+  - platform: factory_reset
+    id: factory_reset_btn
+    internal: true
+
+binary_sensor:
+  # --- Ctrlable Snapcast routing ---
+  # The end-of-playback signal. The integration holds this ON for exactly the
+  # span of the announce, and the add-on only returns once the room has stopped
+  # talking, so the ON->OFF edge is the real moment the answer ended. Without it
+  # the device can only guess with a timeout.
+  - platform: homeassistant
+    id: snapcast_announcing
+    entity_id: ${snapcast_announcing_entity}
+    internal: true
+    on_release:
+      - if:
+          condition:
+            lambda: return id(responding);
+          then:
+            - script.execute: finish_response
+
+  - platform: gpio
+    pin:
+      number: GPIO41
+      mode: INPUT_PULLUP
+      inverted: true
+    id: user_button
+    internal: true
+    on_multi_click:
+      - timing:
+          - ON for at least 50ms
+          - OFF for at least 50ms
+        then:
+          - switch.turn_off: timer_ringing
+      - timing:
+          - ON for at least 10s
+        then:
+          - button.press: factory_reset_btn 
+
+# I2C Bus Configuration
+i2c:
+  sda:
+    number: GPIO45
+    ignore_strapping_warning: true
+  scl:
+    number: GPIO0
+    ignore_strapping_warning: true
+  scan: false
+  id: i2c0
+
+# I2S Bus Configuration
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin:
+      number: GPIO3
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO11
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: i2s_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO4
+    bits_per_sample: 16bit
+    adc_type: external
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_dout_pin: GPIO48
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+
+media_player:
+  - platform: speaker
+    name: None
+    id: speaker_media_player
+    # --- Ctrlable Snapcast routing: this is how the device goes silent ------
+    #
+    # 0.0/0.0 is not a mistake. SpeakerMediaPlayer::set_volume_() remaps the
+    # slider into [volume_min, volume_max] before handing it to the speaker:
+    #
+    #     bounded = remap(volume, 0..1, volume_min_, volume_max_)
+    #     announcement_speaker_->set_volume(bounded)
+    #     if (publish) this->volume = volume;      // <- RAW slider is published
+    #
+    # so the DAC always receives 0.0 (es8311 writes REG32=0, about -95.5dB)
+    # while `id(speaker_media_player).volume` still reports where the user put
+    # the slider. announce_and_wait forwards that raw value to the add-on as the
+    # snapclient volume -- so the HA slider still means something, it just means
+    # "how loud in the room" instead of "how loud on this little speaker".
+    #
+    # Worth knowing: I2SAudioSpeakerBase::set_volume() only calls
+    # audio_dac_->set_mute_off() when volume > 0.0, so a 0.0 bounded volume
+    # never lifts a mute either. Two independent reasons it stays quiet.
+    #
+    # The CoreS3 needed a whole second I2S bus wired to unused pins for this,
+    # because its aw88298's mute and volume are no-ops. The es8311 here is
+    # ESPHome's own component and actually writes the register, so this device
+    # needs no spare GPIOs at all.
+    volume_min: 0.0
+    volume_max: 0.0
+    announcement_pipeline:
+      speaker: i2s_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1  # Atom Echo S3R only has one output channel
+    files:
+      - id: wake_word_triggered_sound
+        file: ${wake_word_triggered_sound_file}
+      - id: timer_finished_sound
+        file: ${timer_finished_sound_file}
+      - id: error_cloud_expired
+        file: ${error_cloud_expired_file}
+    on_announcement:
+      # Stop the wake word (mWW or VA) if the mic is capturing
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+            # Ensure VA stops before moving on
+            - if:
+                condition:
+                  - lambda: |-
+                      return id(wake_word_engine_location).current_option() == "In Home Assistant";
+                then:
+                  - wait_until:
+                      - not:
+                          voice_assistant.is_running:
+      # Since VA isn't running, this is user-intiated media playback. Draw the mute display
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+            
+    on_idle:
+      # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_wake_word
+            - script.execute: set_idle_or_mute_phase
+
+micro_wake_word:
+  id: mww
+  microphone: i2s_mic
+  stop_after_detection: false
+  models:
+    - model: ${okay_nabu_model_file}
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+    - model: ${stop_model_file}
+      id: stop
+      internal: true
+  vad:
+  on_wake_word_detected:
+    # --- Ctrlable Snapcast routing ---
+    # Remember which model fired: the add-on maps wake-word -> zone, so an
+    # announce with an empty wake_word only matches a "*" mapping.
+    - lambda: id(current_wake_word) = wake_word;
+
+    # The chime goes to the room, not to this box. Upstream played it locally
+    # and waited for it to finish before opening the mic; here the local
+    # speaker is silent, so that wait would be dead air.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.chime
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
+          chime: wake
+          volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+
+    # Nothing of ours is playing, but a previous reply might still be draining.
+    - wait_until:
+        - and:
+            - not:
+                media_player.is_announcing:
+            - not:
+                speaker.is_playing:
+
+    - delay: ${chime_lead_in}
+
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: i2s_mic
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    # --- Ctrlable Snapcast routing ---
+    # ctrlable_processing.flac, the same sound the LVA zones make at
+    # end-of-capture. Holds the zone ~1.5s; intent resolution measures 2-9s.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.chime
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
+          chime: thinking
+          volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+  on_tts_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+  # --- Ctrlable Snapcast routing ---
+  # Fires EARLY, while the response is still streaming, so the reply starts in
+  # the room without waiting for synthesis to finish.
+  on_intent_progress:
+    - if:
+        condition:
+          lambda: return !x.empty() && x != id(last_tts_url);
+        then:
+          - lambda: id(last_tts_url) = x;
+          - script.execute: announce_and_wait
+  # Fallback for pipelines that emit no progress events; deduped on the URL.
+  on_tts_end:
+    - if:
+        condition:
+          lambda: return !x.empty() && x != id(last_tts_url);
+        then:
+          - lambda: id(last_tts_url) = x;
+          - script.execute: announce_and_wait
+  on_end:
+    # --- Ctrlable Snapcast routing ---
+    # If an answer went to the room, the exchange is NOT over here -- it ends
+    # when the add-on says playback finished (see the announcing sensor).
+    # Restarting the wake word now would reopen the mic while the room is still
+    # talking, straight into the echo this design exists to avoid.
+    - if:
+        condition:
+          lambda: return id(responding);
+        then:
+          - logger.log: "answer routed to Snapcast; deferring end of exchange"
+          - script.stop: end_exchange_locally
+    - if:
+        condition:
+          lambda: return !id(responding);
+        then:
+          - script.execute: end_exchange_locally
+
+  on_error:
+    # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
+    # These two are ignored for a better user experience
+    - if:
+        condition:
+          and:
+            - lambda: return !id(init_in_progress);
+            - lambda: return code != "duplicate_wake_up_detected";
+            - lambda: return code != "stt-no-text-recognized";
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          
+          - delay: 1s
+          - if:
+              condition:
+                switch.is_off: mute
+              then:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+              else:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+        # If the error code is cloud-auth-failed, serve a local audio file guiding the user.
+    - if:
+        condition:
+          - lambda: return code == "cloud-auth-failed";
+        then:
+          # --- Ctrlable Snapcast routing ---
+          # Rare path, but this device is silent now, so the local file would
+          # give no signal at all that auth expired.
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.chime
+              data:
+                satellite_id: "${snapcast_satellite_id}"
+                wake_word: !lambda return id(current_wake_word);
+                chime: error
+                volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+          
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - script.execute: start_wake_word
+    - script.execute: set_idle_or_mute_phase
+    
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+  
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - wait_until:
+        media_player.is_announcing:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_timer_finished_phase_id};
+    
+script:
+  # --- Ctrlable Snapcast routing -------------------------------------------
+  # Upstream's on_end body, moved verbatim so it can run from two places:
+  # directly (nothing was routed) or from finish_response (after the room
+  # finished playing the answer).
+  - id: end_exchange_locally
+    then:
+      - wait_until:
+          condition:
+            - media_player.is_announcing:
+          timeout: 0.5s
+      - wait_until:
+          - and:
+              - not:
+                  media_player.is_announcing:
+              - not:
+                  speaker.is_playing:
+      - if:
+          condition:
+            - lambda: |-
+                return id(wake_word_engine_location).current_option() == "On device";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start:
+      - script.execute: set_idle_or_mute_phase
+
+  # Hand the answer to the add-on. Uses the HA service rather than a direct
+  # POST so the add-on URL and bearer token stay in the integration's config
+  # flow instead of being duplicated into every device's firmware.
+  #
+  # The call itself is fire-and-forget; the completion signal comes back the
+  # other way, via ${snapcast_announcing_entity}.
+  - id: announce_and_wait
+    mode: restart
+    then:
+      - lambda: id(responding) = true;
+      # Stop listening while the room is talking -- the answer plays through
+      # speakers near this mic and would otherwise re-trigger the wake word.
+      - script.execute: stop_wake_word
+      - homeassistant.service:
+          service: ctrlable_snapcast_tts.announce
+          data:
+            url: !lambda return id(last_tts_url);
+            satellite_id: "${snapcast_satellite_id}"
+            wake_word: !lambda return id(current_wake_word);
+            # The slider is published raw even though the DAC gets 0.0, so this
+            # is the user's actual choice -- see the media_player comment.
+            volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+      # Only fires if the completion signal never arrives: HA down, integration
+      # too old to expose the sensor, or the sensor wedged ON.
+      - delay: ${announce_max_wait}
+      - if:
+          condition:
+            lambda: return id(responding);
+          then:
+            - logger.log: "announce completion signal never arrived; releasing on backstop"
+            - script.execute: finish_response
+
+  # The single place an exchange ends once an answer was routed to Snapcast.
+  - id: finish_response
+    then:
+      - lambda: |-
+          id(responding) = false;
+          id(last_tts_url) = "";
+          id(current_wake_word) = "";
+      - script.execute: end_exchange_locally
+
+  # Starts either mWW or the streaming wake word, depending on the configured location
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  - voice_assistant.is_running:
+              - lambda: |-
+                  return id(wake_word_engine_location).current_option() == "On device";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start:
+      - if:
+          condition:
+            and:
+              - not:
+                  - voice_assistant.is_running:
+              - lambda: |-
+                  return id(wake_word_engine_location).current_option() == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous:
+  # Stops either mWW or the streaming wake word, depending on the configured location
+  - id: stop_wake_word
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(wake_word_engine_location).current_option() == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: |-
+              return id(wake_word_engine_location).current_option() == "On device";
+          then:
+            - micro_wake_word.stop:
+  # Set the voice assistant phase to idle or muted, depending on if the software mute switch is activated
+  - id: set_idle_or_mute_phase
+    then:
+      - if:
+          condition:
+            switch.is_off: mute
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          else:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+  
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: "audio::AudioFile*"
+    then:
+      - lambda: |-
+          if (priority) {
+            id(speaker_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+              .set_announcement(true)
+              .perform();
+          }
+          if ( (id(speaker_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ) || priority) {
+            id(speaker_media_player)
+              ->play_file(sound_file, true, false);
+          }
+      - script.execute: stop_wake_word
+
+switch:
+  - platform: gpio
+    name: Speaker Enable
+    pin: GPIO18
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    disabled_by_default: true
+    internal: true
+  - platform: template
+    name: Microphone Mute
+    id: mute
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_off:
+      - microphone.unmute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+      
+    on_turn_on:
+      - microphone.mute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+      
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      # Turn off the repeat mode and disable the pause between playlist items
+      - lambda: |-
+              id(speaker_media_player)
+                ->make_call()
+                .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+                .set_announcement(true)
+                .perform();
+              id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      # Stop playing the alarm
+      - media_player.stop:
+          announcement: true
+    on_turn_on:
+      # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
+      - lambda: |-
+            id(speaker_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+              .set_announcement(true)
+              .perform();
+            id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+select:
+  - platform: template
+    entity_category: config
+    name: Wake word engine location
+    id: wake_word_engine_location
+    icon: "mdi:account-voice"
+    optimistic: true
+    restore_value: true
+    options:
+      - In Home Assistant
+      - On device
+    initial_option: On device
+    on_value:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - wait_until:
+                lambda: return id(voice_assistant_phase) == ${voice_assist_muted_phase_id} || id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
+            - if:
+                condition:
+                  lambda: return x == "In Home Assistant";
+                then:
+                  - micro_wake_word.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - lambda: id(va).set_use_wake_word(true);
+                        - voice_assistant.start_continuous:
+            - if:
+                condition:
+                  lambda: return x == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - voice_assistant.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - micro_wake_word.start
+
+
+  - platform: template
+    name: "Wake word sensitivity"
+    id: wake_word_sensitivity
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Sets specific wake word probabilities computed for each particular model
+      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
+      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
+      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
+        }
+
+
+globals:
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: "true"
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  # --- Ctrlable Snapcast routing ---
+  # True from the moment an answer is handed to the add-on until the add-on
+  # reports it finished. Gates the wake word so the mic does not reopen while
+  # the room is still talking.
+  - id: responding
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: last_tts_url
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: current_wake_word
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+ 
