@@ -669,10 +669,32 @@ voice_assistant:
         condition:
           lambda: return !id(responding);
         then:
+          # --- Ctrlable Snapcast routing ---
+          # Nothing was routed to the room, so nothing will release the zone. The
+          # add-on holds the group across an exchange and only the ANSWER lets go;
+          # a false wake or an STT no-text would otherwise leave music ducked until
+          # its watchdog fires. Unconditional and idempotent -- releasing a zone
+          # that is not held is a no-op in the add-on.
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.release
+              data:
+                satellite_id: "${snapcast_satellite_id}"
+                wake_word: !lambda return id(current_wake_word);
           - script.execute: end_exchange_locally
   on_error:
     # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
     # These two are ignored for a better user experience
+    # --- Ctrlable Snapcast routing ---
+    # Nothing was routed to the room, so nothing will release the zone. The
+    # add-on holds the group across an exchange and only the ANSWER lets go;
+    # a false wake or an STT no-text would otherwise leave music ducked until
+    # its watchdog fires. Unconditional and idempotent -- releasing a zone
+    # that is not held is a no-op in the add-on.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.release
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
     - if:
         condition:
           and:

@@ -322,6 +322,39 @@ def _disarm_sticky(client_id: str) -> str:
     return _sticky.pop(client_id, "")
 
 
+async def release_group(client_id: str) -> bool:
+    """Restore a held group now, because the exchange ended without an answer.
+
+    The sticky group is released by the ANSWER. An exchange that never produces
+    one -- a false wake, STT recognising nothing, an error mid-turn -- has
+    nothing to release it, so the zone would stay ducked until STICKY_TIMEOUT.
+    False wakes are common enough that ~20s of quiet music each time is a real
+    annoyance, and shortening the timeout instead would risk releasing early
+    during a slow intent (measured 2-9s).
+
+    Takes the client lock rather than racing it: if an announcement is in flight
+    this waits, and by the time it runs that announcement has already disarmed
+    the hold, so this correctly becomes a no-op.
+    """
+    if client_id not in _sticky:
+        return False
+    async with _lock(client_id):
+        live = _disarm_sticky(client_id)
+        if not live:
+            return False
+        cs = get_state().clients.get(client_id)
+        if cs is None:
+            return False
+        try:
+            await get_snap().set_group_stream(cs.announce_group_id, live)
+        except Exception as exc:                                 # noqa: BLE001
+            _LOGGER.warning("Could not release group for %r: %s", client_id, exc)
+            return False
+        _LOGGER.info("Released %r -> %r (exchange ended with no answer)",
+                     client_id, live)
+    return True
+
+
 async def announce(
     client_id: str, tts_url: str, source_host: str, volume: int | None = None,
     drain: float | None = None, silence_ms: int | None = None,

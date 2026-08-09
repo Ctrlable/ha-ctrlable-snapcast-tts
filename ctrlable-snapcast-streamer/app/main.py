@@ -45,6 +45,7 @@ from snapcast import (
 from state import ClientState, allocate_port, ensure_bearer_token, get_state, save_state
 from streamer import (
     _CHIME_SILENCE_PADDING_MS,
+    release_group,
     ClientNotEnabledError,
     ClientNotFoundError,
     NotProvisionedError,
@@ -538,6 +539,31 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class ReleaseBody(BaseModel):
+    satellite_id: str
+    wake_word: str | None = None
+
+
+@app.post("/release/by_satellite", dependencies=[Depends(require_auth)])
+async def api_release(body: ReleaseBody) -> dict:
+    """The satellite says its exchange ended without an answer.
+
+    Idempotent and cheap: releasing a group that is not held is a no-op, so a
+    device may call this on every exchange end without checking first.
+    """
+    state = get_state()
+    try:
+        target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
+    except (SatelliteNotMappedError, NoMatchingMappingError):
+        return {"released": []}
+    released = []
+    for cid in target_ids:
+        with contextlib.suppress(Exception):
+            if await release_group(cid):
+                released.append(cid)
+    return {"released": released}
 
 
 # ── Mappings API ──────────────────────────────────────────────────

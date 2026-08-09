@@ -80,6 +80,25 @@ chime:
           max: 100
           unit_of_measurement: "%"
 
+release:
+  name: Release zone
+  description: >-
+    Tell the add-on this satellite's exchange ended without an answer, so it
+    stops holding the zone's Snapcast group. Safe to call unconditionally -- a
+    zone that is not held is a no-op. Without it, a false wake leaves music
+    ducked until the add-on's watchdog fires.
+  fields:
+    satellite_id:
+      name: Satellite identifier
+      required: true
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      required: false
+      selector:
+        text:
+
 set_mapping:
   name: Set Mapping
   description: Programmatically upsert a satellite → snapclient mapping row.

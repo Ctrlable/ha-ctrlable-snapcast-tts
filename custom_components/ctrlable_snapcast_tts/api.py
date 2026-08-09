@@ -129,6 +129,14 @@ class AddonApiClient:
         result = resp.json()
         return result if isinstance(result, list) else []
 
+    async def release(self, satellite_id: str, wake_word: str | None) -> list[str]:
+        """Tell the add-on this satellite's exchange ended with no answer."""
+        result = await self._post(
+            "/release/by_satellite",
+            {"satellite_id": satellite_id, "wake_word": wake_word},
+        )
+        return (result or {}).get("released", []) if isinstance(result, dict) else []
+
     async def get_mappings(self) -> list[dict]:
         result = await self._get("/mappings")
         return result if isinstance(result, list) else []

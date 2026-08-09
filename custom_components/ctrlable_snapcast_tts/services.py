@@ -39,6 +39,13 @@ CHIME_SCHEMA = vol.Schema(
     }
 )
 
+RELEASE_SCHEMA = vol.Schema(
+    {
+        vol.Required("satellite_id"): cv.string,
+        vol.Optional("wake_word"): cv.string,
+    }
+)
+
 SET_MAPPING_SCHEMA = vol.Schema(
     {
         vol.Required("satellite_id"): cv.string,
@@ -179,6 +186,23 @@ async def handle_chime(hass: HomeAssistant, call: ServiceCall) -> None:
         _LOGGER.warning("ctrlable_snapcast_tts: cannot reach add-on for chime")
     except Exception as exc:  # noqa: BLE001 - a missed chime must never break an exchange
         _LOGGER.warning("ctrlable_snapcast_tts: chime failed — %s", exc)
+
+
+async def handle_release(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Exchange ended without an answer -- stop holding the zone.
+
+    Fire-and-forget by design: the add-on treats releasing an unheld group as a
+    no-op, so a device can call this on every exchange end without tracking
+    whether anything was actually held. Failures are logged at debug because a
+    missed release self-heals via the add-on's watchdog.
+    """
+    client = _get_client(hass)
+    if client is None:
+        return
+    try:
+        await client.release(call.data["satellite_id"], call.data.get("wake_word"))
+    except Exception as exc:  # noqa: BLE001 - never let this break an exchange
+        _LOGGER.debug("ctrlable_snapcast_tts: release failed — %s", exc)
 
 
 async def handle_set_mapping(hass: HomeAssistant, call: ServiceCall) -> None:
