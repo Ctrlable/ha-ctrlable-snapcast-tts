@@ -61,30 +61,60 @@ class AddonApiClient:
         result = await self._get("/snapcast/clients")
         return result if isinstance(result, list) else []
 
-    async def announce(self, client_id: str, url: str, source_host: str) -> dict:
+    async def announce(
+        self, client_id: str, url: str, source_host: str, volume: int | None = None
+    ) -> dict:
         result = await self._post(
             "/announce",
-            {"client_id": client_id, "url": url, "source_host": source_host},
+            {"client_id": client_id, "url": url, "source_host": source_host, "volume": volume},
         )
         return result if isinstance(result, dict) else {}
 
     async def announce_multi(
-        self, client_ids: list[str], url: str, source_host: str
+        self, client_ids: list[str], url: str, source_host: str, volume: int | None = None
     ) -> list[dict]:
         result = await self._post(
             "/announce/multi",
-            {"client_ids": client_ids, "url": url, "source_host": source_host},
+            {"client_ids": client_ids, "url": url, "source_host": source_host,
+             "volume": volume},
         )
         return result if isinstance(result, list) else []
 
     async def announce_by_satellite(
-        self, satellite_id: str, wake_word: str | None, url: str, source_host: str
+        self, satellite_id: str, wake_word: str | None, url: str, source_host: str,
+        volume: int | None = None,
     ) -> list[dict]:
         try:
             async with httpx.AsyncClient(verify=False, timeout=ANNOUNCE_TIMEOUT) as client:
                 resp = await client.post(
                     f"{self._url}/announce/by_satellite",
-                    json={"satellite_id": satellite_id, "wake_word": wake_word, "url": url, "source_host": source_host},
+                    json={"satellite_id": satellite_id, "wake_word": wake_word, "url": url,
+                          "source_host": source_host, "volume": volume},
+                    headers=self._headers,
+                )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            raise CannotConnectError from exc
+        if resp.status_code == 401:
+            raise InvalidAuthError
+        if resp.status_code == 404:
+            raise SatelliteNotMappedError(satellite_id)
+        if resp.status_code == 422:
+            raise NoMatchingMappingError(satellite_id, wake_word)
+        resp.raise_for_status()
+        result = resp.json()
+        return result if isinstance(result, list) else []
+
+    async def announce_chime(
+        self, satellite_id: str, wake_word: str | None, chime: str,
+        volume: int | None = None,
+    ) -> list[dict]:
+        """Play a chime bundled in the add-on on this satellite's zone."""
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=ANNOUNCE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{self._url}/announce/chime",
+                    json={"satellite_id": satellite_id, "wake_word": wake_word,
+                          "chime": chime, "volume": volume},
                     headers=self._headers,
                 )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:

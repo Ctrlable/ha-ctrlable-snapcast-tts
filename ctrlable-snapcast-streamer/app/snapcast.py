@@ -233,6 +233,26 @@ class SnapcastClient:
     async def set_group_stream(self, group_id: str, stream_id: str) -> None:
         await self._call("Group.SetStream", {"id": group_id, "stream_id": stream_id})
 
+    async def set_client_volume(self, client_id: str, percent: int, muted: bool = False) -> None:
+        """Set an announcement client's volume.
+
+        This is what actually governs how loud an announcement is. The satellite's
+        own media_player volume does NOT -- once the answer is routed to Snapcast
+        the device speaker is out of the path entirely, so its slider moves and
+        nothing changes. Measured 2026-08-09: slider swept 34% -> 7% across four
+        exchanges with no audible difference, because the client sat at 55%
+        throughout.
+
+        Persistent by design, not restored afterwards: an announcement client is
+        dedicated to announcements, so its volume has no other meaning to restore
+        to, and leaving it set means the value is visible in any Snapcast UI.
+        """
+        percent = max(0, min(100, int(percent)))
+        await self._call(
+            "Client.SetVolume",
+            {"id": client_id, "volume": {"muted": muted, "percent": percent}},
+        )
+
     # ── Event subscription ────────────────────────────────────────
 
     def subscribe_events(self, callback: Any) -> None:

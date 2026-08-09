@@ -27,6 +27,58 @@ announce:
       selector:
         text:
           multiple: true
+    volume:
+      name: Volume
+      description: >-
+        Announcement loudness, 0-100. This sets the snapclient's volume, which is
+        what governs how loud the reply is -- the satellite's own volume control
+        has no effect once audio is routed to Snapcast. Persists until changed.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+chime:
+  name: Chime
+  description: >-
+    Play a short bundled sound on the snapclient mapped to a satellite. Used so a
+    Snapcast-routed satellite can put its wake sound in the room instead of on its
+    own speaker.
+  fields:
+    satellite_id:
+      name: Satellite identifier
+      description: ESPHome device name of the calling satellite.
+      required: true
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      description: The wake word that triggered this, for wake-word-aware routing.
+      required: false
+      selector:
+        text:
+    chime:
+      name: Chime
+      description: Which bundled sound to play.
+      required: false
+      default: wake
+      selector:
+        select:
+          options:
+            - wake
+            - timer
+            - error
+    volume:
+      name: Volume
+      description: Snapclient volume, 0-100.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
 
 set_mapping:
   name: Set Mapping

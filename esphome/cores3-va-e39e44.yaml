@@ -29,6 +29,13 @@ substitutions:
   timer_finished_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
   error_cloud_expired_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
 
+  # How long to wait after the wake chime before opening the mic. Snapcast
+  # buffers ~1s, so the chime lands in the room about a second after the wake
+  # word -- without this the mic would open underneath its own chime and the
+  # first syllable of the request would be lost to it. Raise if you hear the
+  # chime bleeding into transcriptions.
+  chime_lead_in: 700ms
+
   # Micro wake word models
   okay_nabu_model_file: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
   stop_model_file: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
@@ -197,12 +204,42 @@ globals:
     initial_value: '""'
 
 i2s_audio:
-  id: i2s_audio_bus
-  i2s_lrclk_pin: GPIO33
-  i2s_bclk_pin: GPIO34
-  i2s_mclk_pin:
-    number: GPIO0
-    ignore_strapping_warning: true
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: GPIO33
+    i2s_bclk_pin: GPIO34
+    i2s_mclk_pin:
+      number: GPIO0
+      ignore_strapping_warning: true
+
+  # --- Ctrlable Snapcast routing: the silent sink -------------------------
+  #
+  # A second I2S controller (the S3 has two) wired to pins with nothing on the
+  # other end. The announcement pipeline plays into this, which buys two things
+  # that were previously mutually exclusive:
+  #
+  #   1. HA's assist_satellite leaves `responding`. That state is cleared by an
+  #      announcement-finished report, which ESPHome only sends when
+  #      voice_assistant owns a media_player. Before this, choosing silence meant
+  #      the entity sat in `responding` forever -- confirmed 2026-08-09, entity
+  #      last_changed pinned to the previous exchange's TTS start.
+  #   2. It is genuinely inaudible. Not muted -- muting the announcement pipeline
+  #      does not work (measured: "PLAYING / Muted: YES" then full-volume audio)
+  #      and the aw88298's set_mute_off() is a no-op that strands the DAC. The
+  #      bits are simply clocked out to unconnected pads.
+  #
+  # It also fixes something unrelated and long-standing: the mic and the real
+  # speaker shared one bus, so every wake word logged
+  #     [E][i2s_audio.speaker.std] Parent bus is busy
+  #     [E][i2s_audio.speaker] Driver failed to start; retrying in 1 second
+  # and lost a second to the retry. Separate controllers, no contention.
+  #
+  # PIN CHOICE: Port B (G8/G9) and Port C (G17). Grove headers, so they are
+  # guaranteed not to be internally wired to anything on the CoreS3 -- unlike the
+  # free-looking GPIOs in the 5-21 range, several of which land on the camera.
+  # DO NOT plug a Grove device into Port B or Port C on this unit.
+  - id: i2s_null_bus
+    i2s_lrclk_pin: GPIO9
+    i2s_bclk_pin: GPIO8
 
 i2c:
   - id: bsp_bus
@@ -364,6 +401,9 @@ microphone:
     i2s_audio_id: i2s_audio_bus
 
 speaker:
+  # The real speaker. Still defined -- deleting it would orphan the aw88298 and
+  # make going back to local audio a rewrite rather than a one-line change -- but
+  # nothing routes to it any more.
   - platform: i2s_audio
     i2s_audio_id: i2s_audio_bus
     id: i2s_speaker
@@ -371,17 +411,29 @@ speaker:
     i2s_dout_pin: GPIO13
     audio_dac: aw88298_dac
 
+  # --- Ctrlable Snapcast routing: the silent sink -------------------------
+  # No audio_dac: there is no DAC on the far end, and that is the point.
+  - platform: i2s_audio
+    i2s_audio_id: i2s_null_bus
+    id: null_speaker
+    dac_type: external
+    i2s_dout_pin: GPIO17
+
 media_player:
   - platform: speaker
     name: None
     id: va_media_player
-    # 0.0, not upstream's 0.5: volume_set(0) maps to volume_min, so at 0.5 the
-    # "silent" local copy would still play at half volume. It has to be genuinely
-    # inaudible -- see on_tts_start.
+    # These no longer gate audibility -- the pipeline below goes nowhere, so
+    # local output is silent at any setting. The slider now has a different job:
+    # announce_and_wait forwards its 0-1 value to the add-on as a 0-100 snapclient
+    # volume, so this control governs how loud the reply is IN THE ROOM. Kept at
+    # full range for that reason.
     volume_min: 0.0
-    volume_max: 0.8
+    volume_max: 1.0
     announcement_pipeline:
-      speaker: i2s_speaker
+      # Silent sink -- see the i2s_null_bus comment. Everything audible leaves
+      # this device over the network, not over I2S.
+      speaker: null_speaker
       format: FLAC
       sample_rate: 48000
       num_channels: 1
@@ -416,10 +468,13 @@ media_player:
             - script.execute: draw_display
     on_idle:
       # Since VA isn't running, this is the end of user-initiated media playback. Restart the wake word.
+      # `responding` guard is Ctrlable's: see above.
       - if:
           condition:
-            not:
-              voice_assistant.is_running:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: return !id(responding);
           then:
             - script.execute: start_wake_word
             - script.execute: set_idle_or_mute_phase
@@ -445,6 +500,23 @@ micro_wake_word:
     # Remember which model fired: the add-on can map wake-word -> target zone,
     # so an announce with an empty wake_word only matches a "*" mapping.
     - lambda: id(current_wake_word) = wake_word;
+
+    # --- Ctrlable Snapcast routing ---
+    # The chime goes to the room, not to this box. Fired first and not awaited:
+    # homeassistant.service is fire-and-forget, so the add-on's stream switch
+    # overlaps the local timing dance below instead of adding to it.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.chime
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
+          chime: wake
+          volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
+
+    # Still played locally, still silent, and still worth keeping: this is what
+    # paces the gap before the mic opens. Upstream uses the chime's own length as
+    # that delay, and the sink decodes in real time, so the timing survives the
+    # move to Snapcast even though the sound does not.
     - script.execute:
         id: play_sound
         priority: true
@@ -460,7 +532,12 @@ micro_wake_word:
             - not:
                 media_player.is_announcing:
             - not:
-                speaker.is_playing:
+                speaker.is_playing: null_speaker
+
+    # Snapcast's buffer puts the room's chime about a second behind the local
+    # one. Opening the mic on the local timing alone would catch the tail of the
+    # chime coming back through the room -- so hold for the difference.
+    - delay: ${chime_lead_in}
 
     - voice_assistant.start:
         wake_word: !lambda return wake_word;
@@ -468,26 +545,22 @@ micro_wake_word:
 voice_assistant:
   id: va
   microphone: i2s_mic
-  # NO media_player HERE, and this is now an evidence-based decision rather
-  # than a guess.
+  # RECONNECTED, now that the announcement pipeline is silent.
   #
-  # With it present, ESPHome plays the TTS locally and reports "announcement
-  # finished" to HA, which is what lets assist_satellite leave `responding`.
-  # But the local copy CANNOT be silenced:
-  #   * m5stack's aw88298 set_mute_off() is a no-op, so the DAC mute is one-way
-  #     and would strand the device silent.
-  #   * media_player volume/mute does not apply to the ANNOUNCEMENT pipeline.
-  #     Measured 23:57:29 -- "PLAYING / Muted: YES" and the speaker then played
-  #     at full volume anyway. ESPHome plays announcements over the media
-  #     volume on purpose; that is the component's intent, not a bug.
+  # This was removed because with it present ESPHome plays the TTS locally, and
+  # the local copy could not be silenced: the aw88298's set_mute_off() is a no-op
+  # that strands the DAC, and media_player volume/mute does not apply to the
+  # ANNOUNCEMENT pipeline at all (measured -- "PLAYING / Muted: YES" followed by
+  # full-volume audio; ESPHome plays announcements over the media volume by
+  # design). The cost of removing it was assist_satellite never leaving
+  # `responding`, because that state is cleared by the announcement-finished
+  # report only this connection produces.
   #
-  # So the choice is: correct HA state with unmutable local audio, or silence
-  # with a stale entity. Audio blasting out of the device in the room you are
-  # standing in is a real defect; a stale entity is cosmetic, and subsequent
-  # wake words work regardless. Silence wins.
-  #
-  # The media_player COMPONENT stays defined, so wake / timer / error sounds
-  # still play locally -- only the assistant's auto-routing is disconnected.
+  # Routing the pipeline to an unconnected I2S bus gets both: ESPHome plays,
+  # reports finished, HA clears the state -- and not a sound comes out. The
+  # local decode also runs in real time, so it paces the state machine to
+  # roughly the true answer length instead of a fixed timeout.
+  media_player: va_media_player
   micro_wake_word: mww
   use_wake_word: false
   noise_suppression_level: 2
@@ -570,6 +643,16 @@ voice_assistant:
         condition:
           - lambda: return code == "cloud-auth-failed";
         then:
+          # --- Ctrlable Snapcast routing ---
+          # Rare path, but the local speaker is silent now, so without this the
+          # user gets no audible signal at all that auth expired.
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.chime
+              data:
+                satellite_id: "${snapcast_satellite_id}"
+                wake_word: !lambda return id(current_wake_word);
+                chime: error
+                volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
           - script.execute:
               id: play_sound
               priority: true
@@ -818,7 +901,7 @@ script:
             - not:
                 media_player.is_announcing:
             - not:
-                speaker.is_playing:
+                speaker.is_playing: null_speaker
     # Restart only mWW if enabled; streaming wake words automatically restart
     - if:
         condition:
@@ -840,12 +923,13 @@ script:
   # the add-on URL and bearer token stay in the integration's config flow
   # instead of being duplicated into every device's firmware and secrets.yaml.
   #
-  # LIMITATION, stated plainly: homeassistant.service is fire-and-forget, so
-  # nothing tells the device when playback ended. announce_max_wait is a cap,
-  # not a real signal -- the device holds "replying" for that long regardless
-  # of how short the answer was. The proper fix is a completion entity exposed
-  # by ctrlable_snapcast_tts that this config can watch; the integration has no
-  # entity platforms today, only services.
+  # homeassistant.service is fire-and-forget, so this call itself says nothing
+  # about when playback ended. The signal comes back the other way: the
+  # integration holds ${snapcast_announcing_entity} ON for the span of the
+  # announce, and the add-on only returns once the room has stopped talking, so
+  # that sensor's ON->OFF edge is the real end of playback. Verified 2026-08-09 --
+  # a 23.2s hold for a long answer and 3.4s for a short one, tracking the audio
+  # rather than any timeout. announce_max_wait below is now only a backstop.
   - id: announce_and_wait
     mode: restart
     then:
@@ -859,6 +943,12 @@ script:
             url: !lambda return id(last_tts_url);
             satellite_id: "${snapcast_satellite_id}"
             wake_word: !lambda return id(current_wake_word);
+            # The volume control that actually does something. This device's
+            # speaker is out of the path, so the slider has to reach the
+            # snapclient or it reaches nothing -- which is exactly what it did
+            # before: swept 34% -> 7% across four exchanges with no audible
+            # change, because the client sat at 55% the whole time.
+            volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
       # Normal path is snapcast_announcing going ON then OFF above. This only
       # fires if that never arrives -- HA down, integration too old to expose
       # the entity, or the sensor wedged ON.

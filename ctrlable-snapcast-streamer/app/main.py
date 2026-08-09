@@ -12,6 +12,7 @@ import struct
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
@@ -283,12 +284,20 @@ class AnnounceBody(BaseModel):
     client_id: str
     url: str
     source_host: str
+    # Announcement loudness. The satellite speaker is out of the audio path
+    # once the answer goes to Snapcast, so its own volume control is inert --
+    # this is the value that actually does something. None leaves it alone.
+    volume: int | None = None
 
 
 class AnnounceMultiBody(BaseModel):
     client_ids: list[str]
     url: str
     source_host: str
+    # Announcement loudness. The satellite speaker is out of the audio path
+    # once the answer goes to Snapcast, so its own volume control is inert --
+    # this is the value that actually does something. None leaves it alone.
+    volume: int | None = None
 
 
 class PrewarmBody(BaseModel):
@@ -344,7 +353,7 @@ async def api_prewarm(body: PrewarmBody) -> dict:
 @app.post("/announce", dependencies=[Depends(require_auth)])
 async def api_announce(body: AnnounceBody) -> dict:
     try:
-        result = await announce(body.client_id, body.url, body.source_host)
+        result = await announce(body.client_id, body.url, body.source_host, body.volume)
         _add_activity(body.client_id, result.fmt, result.duration, ok=True)
         return {"duration": round(result.duration, 3), "format": result.fmt}
     except ClientNotFoundError as exc:
@@ -363,7 +372,7 @@ async def api_announce(body: AnnounceBody) -> dict:
 
 @app.post("/announce/multi", dependencies=[Depends(require_auth)])
 async def api_announce_multi(body: AnnounceMultiBody) -> list[dict]:
-    results = await announce_multi(body.client_ids, body.url, body.source_host)
+    results = await announce_multi(body.client_ids, body.url, body.source_host, body.volume)
     out = []
     for r in results:
         _add_activity(r.client_id, r.fmt, r.duration, ok=True)
@@ -377,6 +386,10 @@ class AnnounceBySatelliteBody(BaseModel):
     wake_word: str | None = None
     url: str
     source_host: str
+    # Announcement loudness. The satellite speaker is out of the audio path
+    # once the answer goes to Snapcast, so its own volume control is inert --
+    # this is the value that actually does something. None leaves it alone.
+    volume: int | None = None
 
 
 @app.post("/announce/by_satellite", dependencies=[Depends(require_auth)])
@@ -391,12 +404,12 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
 
     try:
         if len(target_ids) == 1:
-            result = await announce(target_ids[0], body.url, body.source_host)
+            result = await announce(target_ids[0], body.url, body.source_host, body.volume)
             _add_activity(target_ids[0], result.fmt, result.duration, ok=True)
             out: list[dict] = [{"client_id": target_ids[0], "duration": round(result.duration, 3),
                                 "audio_duration": round(result.audio_duration, 3), "format": result.fmt}]
         else:
-            raw = await announce_multi(target_ids, body.url, body.source_host)
+            raw = await announce_multi(target_ids, body.url, body.source_host, body.volume)
             out = []
             for r in raw:
                 _add_activity(r.client_id, r.fmt, r.duration, ok=True)
@@ -416,6 +429,70 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
     except Exception as exc:
         for cid in target_ids:
             _add_activity(cid, "", None, ok=False, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Chimes ────────────────────────────────────────────────────────
+
+# Bundled rather than fetched, deliberately. The wake chime is the most
+# latency-sensitive sound in the system -- it is the only feedback that the
+# device heard you -- so it cannot wait on a GitHub round-trip, and it has to
+# keep working when the house has no internet. ffmpeg reads these straight off
+# disk, so a chime costs one stream switch and nothing else.
+_SOUNDS_DIR = Path(__file__).parent / "sounds"
+_CHIMES = {
+    "wake": "wake_word_triggered.flac",
+    "timer": "timer_finished.flac",
+    "error": "error_cloud_expired.mp3",
+}
+
+
+class AnnounceChimeBody(BaseModel):
+    satellite_id: str
+    wake_word: str | None = None
+    chime: str = "wake"
+    volume: int | None = None
+
+
+@app.post("/announce/chime", dependencies=[Depends(require_auth)])
+async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
+    """Play a bundled chime on a satellite's mapped snapclient.
+
+    Same group-switch and playback-wait machinery as a real announcement --
+    the wait matters here too, because the `finally` that restores the group's
+    live stream must not fire while the chime is still coming out.
+
+    Not written to the activity log: a chime fires on every wake word, and
+    interleaving them would bury the answers that log exists to show.
+    """
+    name = _CHIMES.get(body.chime)
+    if name is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown chime {body.chime!r}; have {sorted(_CHIMES)}",
+        )
+    path = _SOUNDS_DIR / name
+    if not path.is_file():
+        raise HTTPException(status_code=500, detail=f"Chime file missing from image: {path}")
+
+    state = get_state()
+    try:
+        target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
+    except SatelliteNotMappedError:
+        raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping") from None
+    except NoMatchingMappingError:
+        raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}") from None
+
+    # source_host namespaces the per-client format cache; without this a chime
+    # and an answer from the same satellite would fight over one cached format.
+    src = f"chime:{body.chime}"
+    try:
+        raw = await announce_multi(target_ids, str(path), src, body.volume)
+        return [{"client_id": r.client_id, "duration": round(r.duration, 3),
+                 "audio_duration": round(r.audio_duration, 3), "format": r.fmt} for r in raw]
+    except (SnapcastRPCError, SnapcastTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

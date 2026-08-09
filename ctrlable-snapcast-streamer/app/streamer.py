@@ -163,7 +163,15 @@ async def _stream_ffmpeg(url: str, host: str, port: int) -> int:
     return written
 
 
-async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceResult:
+# Last volume we pushed per client, so a satellite that sends its slider value on
+# every single announce does not cost an RPC every single announce. In-memory
+# only: after a restart the first announce re-applies, which is harmless.
+_volume_cache: dict[str, int] = {}
+
+
+async def announce(
+    client_id: str, tts_url: str, source_host: str, volume: int | None = None
+) -> AnnounceResult:
     state = get_state()
     cs = state.clients.get(client_id)
     if cs is None:
@@ -176,6 +184,18 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
     snap = get_snap()
 
     async with _lock(client_id):
+        # Volume before the stream switch, so the level is already right when the
+        # first chunk lands rather than ramping a word or two in.
+        if volume is not None and _volume_cache.get(client_id) != int(volume):
+            try:
+                await snap.set_client_volume(client_id, int(volume))
+                _volume_cache[client_id] = int(volume)
+                _LOGGER.info("Set %r volume to %d%%", client_id, int(volume))
+            except Exception as exc:
+                # Never fail an announcement over a volume change -- a reply at
+                # the wrong level still beats no reply.
+                _LOGGER.warning("Could not set volume for %r: %s", client_id, exc)
+
         # Each announcement client lives permanently in its own Snapcast group.
         # When a user switches to AirPlay / Music Assistant / etc., Snapcast
         # changes the GROUP's stream_id — the client never leaves the group.
@@ -324,10 +344,12 @@ async def announce(client_id: str, tts_url: str, source_host: str) -> AnnounceRe
     )
 
 
-async def announce_multi(client_ids: list[str], tts_url: str, source_host: str) -> list[AnnounceResult]:
+async def announce_multi(
+    client_ids: list[str], tts_url: str, source_host: str, volume: int | None = None
+) -> list[AnnounceResult]:
     """Announce to multiple clients in parallel; each client streams independently."""
     results = await asyncio.gather(
-        *(announce(cid, tts_url, source_host) for cid in client_ids),
+        *(announce(cid, tts_url, source_host, volume) for cid in client_ids),
         return_exceptions=True,
     )
     out = []
