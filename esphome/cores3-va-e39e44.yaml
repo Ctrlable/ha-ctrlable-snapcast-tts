@@ -34,9 +34,10 @@ substitutions:
   # How long to hold the mic closed after the wake word. Nothing plays locally
   # any more, so this is the whole gap, and it has to cover Snapcast's buffer
   # (~1s) plus the chime itself (awake.wav is 0.40s) or the mic opens underneath
-  # its own chime coming back through the room. Lower it if the device feels
-  # sluggish; raise it if chime artefacts show up in transcriptions.
-  chime_lead_in: 1200ms
+  # its own chime coming back through the room. Measured: the chime becomes
+  # audible ~1.0s after the service call and ends ~1.4s. Lower it if the device
+  # feels sluggish; raise it if chime artefacts show up in transcriptions.
+  chime_lead_in: 1500ms
 
   # Blank the screen after this long at rest. Touch or a wake word brings it
   # back. Only ever sleeps from idle/muted -- never mid-conversation.

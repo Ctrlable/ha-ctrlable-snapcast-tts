@@ -14,7 +14,13 @@ from snapcast import get_client as get_snap
 from state import get_state, save_state
 
 _LOGGER = logging.getLogger(__name__)
-_BUFFER_DRAIN = 1.5  # seconds after stream end before restoring group
+# Seconds to keep the group on the announcement stream after the last byte is
+# pushed. This is NOT slack -- it is what covers snapserver's ~1s output buffer.
+# Restore the group sooner than that and the audio is still queued when the
+# subscriber changes, so it is discarded and NOTHING PLAYS while every layer
+# reports success. Verified the hard way on 2026-08-09 with a 0.4s value.
+# Do not lower it below ~1.2s without re-measuring the server's buffer.
+_BUFFER_DRAIN = 1.5
 # Hard ceiling on how long announce() will block waiting out playback. A URL
 # that probes as an hour long must not pin a client's lock for an hour.
 _MAX_PLAYBACK_WAIT = 300.0

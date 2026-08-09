@@ -451,8 +451,24 @@ _CHIMES = {
     "timer": "timer_finished.flac",
     "error": "error_cloud_expired.mp3",
 }
-# A chime must not sit on a client's lock long enough to delay the answer.
-_CHIME_DRAIN = 0.4
+# NO SHORTENED DRAIN FOR CHIMES. This was 0.4s, to stop a chime sitting on the
+# client's lock long enough to delay the answer, and it silently broke every
+# chime -- because the drain is not idle time, it is what covers snapserver's
+# ~1s output buffer.
+#
+# Measured 2026-08-09 by sampling the group's stream_id every 200ms during a
+# wake chime:
+#     0.21s  -> ann_snapclientannouncement616
+#     1.03s  -> Annoucements
+# The stream was held 0.82s. awake.wav (0.40s audio + 0.40s drain) was therefore
+# discarded from the buffer before a sample of it reached the speaker, and
+# done.wav (1.12s + 0.40s) played roughly its first half and was cut -- which is
+# exactly what it sounded like.
+#
+# The hold has to outlast audio_duration PLUS the server buffer, which is what
+# the default 1.5s already does. Cost of putting it back: the thinking chime
+# holds the zone ~2.6s. Intent resolution measures 2-9s, so it clears in time;
+# and a chime that plays late beats a chime that does not play.
 
 
 class AnnounceChimeBody(BaseModel):
@@ -495,7 +511,7 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
     # and an answer from the same satellite would fight over one cached format.
     src = f"chime:{body.chime}"
     try:
-        raw = await announce_multi(target_ids, str(path), src, body.volume, _CHIME_DRAIN)
+        raw = await announce_multi(target_ids, str(path), src, body.volume)
         return [{"client_id": r.client_id, "duration": round(r.duration, 3),
                  "audio_duration": round(r.audio_duration, 3), "format": r.fmt} for r in raw]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:
