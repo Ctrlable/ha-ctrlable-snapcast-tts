@@ -207,7 +207,8 @@ _volume_cache: dict[str, int] = {}
 
 
 async def announce(
-    client_id: str, tts_url: str, source_host: str, volume: int | None = None
+    client_id: str, tts_url: str, source_host: str, volume: int | None = None,
+    drain: float | None = None,
 ) -> AnnounceResult:
     state = get_state()
     cs = state.clients.get(client_id)
@@ -361,7 +362,12 @@ async def announce(
                     "so callers may think playback ended early", tts_url,
                 )
 
-            await asyncio.sleep(_BUFFER_DRAIN)
+            # Chimes pass a shorter drain. The default is sized so a long answer
+            # is fully out of the buffer before the group's live stream comes
+            # back; a chime is under a second and holds this client's lock the
+            # whole time, so the full 1.5s would push a fast answer back by that
+            # much for no benefit.
+            await asyncio.sleep(_BUFFER_DRAIN if drain is None else drain)
             duration = time.monotonic() - t0
             _LOGGER.info(
                 "Announced to %r: audio %.2fs, pushed in %.2fs, held %.2fs via %s",
@@ -382,11 +388,12 @@ async def announce(
 
 
 async def announce_multi(
-    client_ids: list[str], tts_url: str, source_host: str, volume: int | None = None
+    client_ids: list[str], tts_url: str, source_host: str, volume: int | None = None,
+    drain: float | None = None,
 ) -> list[AnnounceResult]:
     """Announce to multiple clients in parallel; each client streams independently."""
     results = await asyncio.gather(
-        *(announce(cid, tts_url, source_host, volume) for cid in client_ids),
+        *(announce(cid, tts_url, source_host, volume, drain) for cid in client_ids),
         return_exceptions=True,
     )
     out = []

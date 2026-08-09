@@ -440,11 +440,19 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
 # keep working when the house has no internet. ffmpeg reads these straight off
 # disk, so a chime costs one stream switch and nothing else.
 _SOUNDS_DIR = Path(__file__).parent / "sounds"
+# wake/thinking are the LVA satellites' own awake.wav and done.wav, lifted
+# verbatim off the host (md5 7969eb81 / 48a48631, identical across all 13
+# wyoming-satellite installs) so every voice endpoint in the house sounds the
+# same. `thinking` is wyoming's done.wav -- it fires at end-of-capture, which is
+# the moment the assistant starts thinking.
 _CHIMES = {
-    "wake": "wake_word_triggered.flac",
+    "wake": "awake.wav",
+    "thinking": "done.wav",
     "timer": "timer_finished.flac",
     "error": "error_cloud_expired.mp3",
 }
+# A chime must not sit on a client's lock long enough to delay the answer.
+_CHIME_DRAIN = 0.4
 
 
 class AnnounceChimeBody(BaseModel):
@@ -487,7 +495,7 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
     # and an answer from the same satellite would fight over one cached format.
     src = f"chime:{body.chime}"
     try:
-        raw = await announce_multi(target_ids, str(path), src, body.volume)
+        raw = await announce_multi(target_ids, str(path), src, body.volume, _CHIME_DRAIN)
         return [{"client_id": r.client_id, "duration": round(r.duration, 3),
                  "audio_duration": round(r.audio_duration, 3), "format": r.fmt} for r in raw]
     except (SnapcastRPCError, SnapcastTimeoutError) as exc:

@@ -20,25 +20,44 @@ substitutions:
   error_no_wifi_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_no_wifi.png
   error_no_ha_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_no_ha_file.png
   mute_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_mute.png
+  # Shown for the instant between the wake word and the mic opening, so the
+  # face reacts before it starts listening instead of after.
+  awake_illustration_file: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/images/ctrlable_awake.png
 
   # Fonts
   mdi_webfont_file: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf
 
-  # Audio files
-  wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
-  timer_finished_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
-  error_cloud_expired_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+  # No local audio files. Every sound this device makes comes out of the room's
+  # snapclient via the add-on's bundled chimes -- which are the LVA satellites'
+  # own awake.wav and done.wav, so the whole house answers in one voice.
 
-  # How long to wait after the wake chime before opening the mic. Snapcast
-  # buffers ~1s, so the chime lands in the room about a second after the wake
-  # word -- without this the mic would open underneath its own chime and the
-  # first syllable of the request would be lost to it. Raise if you hear the
-  # chime bleeding into transcriptions.
-  chime_lead_in: 700ms
+  # How long to hold the mic closed after the wake word. Nothing plays locally
+  # any more, so this is the whole gap, and it has to cover Snapcast's buffer
+  # (~1s) plus the chime itself (awake.wav is 0.40s) or the mic opens underneath
+  # its own chime coming back through the room. Lower it if the device feels
+  # sluggish; raise it if chime artefacts show up in transcriptions.
+  chime_lead_in: 1200ms
 
-  # Micro wake word models
+  # Blank the screen after this long at rest. Touch or a wake word brings it
+  # back. Only ever sleeps from idle/muted -- never mid-conversation.
+  screen_timeout: 25s
+
+  # Micro wake word models.
+  #
+  # There is no "maya" model. The complete published set is okay_nabu,
+  # hey_jarvis, hey_mycroft and alexa (esphome/micro-wake-word-models v2), plus
+  # four experiments -- okay_computer, hey_home_assistant, hey_peppa_pig,
+  # choo_choo_homie. A custom word has to be trained; see the note in the models
+  # list below.
+  #
+  # COST OF ADDING MORE: every model runs inference on every audio frame, all
+  # the time. Flash and PSRAM are not the constraint here, CPU is. If the device
+  # starts stuttering or missing wake words, remove models rather than lowering
+  # sensitivity.
   okay_nabu_model_file: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
   stop_model_file: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+  okay_computer_model_file: https://github.com/esphome/micro-wake-word-models/raw/main/models/v2/experiments/okay_computer.json
+  hey_home_assistant_model_file: https://github.com/esphome/micro-wake-word-models/raw/main/models/v2/experiments/hey_home_assistant.json
 
   loading_illustration_background_color: '000000'
   idle_illustration_background_color: '000000'
@@ -46,6 +65,7 @@ substitutions:
   thinking_illustration_background_color: '000000'
   replying_illustration_background_color: '000000'
   error_illustration_background_color: '000000'
+  awake_illustration_background_color: '000000'
 
   # Phases of the Voice Assistant
   # The voice assistant is ready to be triggered by a wake word
@@ -56,6 +76,8 @@ substitutions:
   voice_assist_thinking_phase_id: "3"
   # The voice assistant is replying to the command
   voice_assist_replying_phase_id: "4"
+  # The wake word just fired; the mic is not open yet
+  voice_assist_awake_phase_id: "5"
   # The voice assistant is not ready
   voice_assist_not_ready_phase_id: "10"
   # The voice assistant encountered an error
@@ -437,11 +459,6 @@ media_player:
       format: FLAC
       sample_rate: 48000
       num_channels: 1
-    files:
-      - id: wake_word_triggered_sound
-        file: ${wake_word_triggered_sound_file}
-      - id: error_cloud_expired
-        file: ${error_cloud_expired_file}
     on_announcement:
       # Stop the wake word (mWW or VA) if the mic is capturing
       - if:
@@ -459,10 +476,17 @@ media_player:
                       - not:
                           voice_assistant.is_running:
       # Since VA isn't running, this is user-initiated media playback. Draw the mute display
+      #
+      # `responding` guard is Ctrlable's. VA goes IDLE at tts_start, so during a
+      # Snapcast-routed reply the silent local copy looks exactly like
+      # user-initiated playback and would repaint the screen to the mute face
+      # for the length of the answer.
       - if:
           condition:
-            not:
-              voice_assistant.is_running:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - lambda: return !id(responding);
           then:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
             - script.execute: draw_display
@@ -491,6 +515,16 @@ micro_wake_word:
       id: hey_jarvis
     - model: hey_mycroft
       id: hey_mycroft
+    - model: alexa
+      id: alexa
+    - model: ${okay_computer_model_file}
+      id: okay_computer
+    - model: ${hey_home_assistant_model_file}
+      id: hey_home_assistant
+    # To add a custom word ("maya"), train it with the microWakeWord notebook at
+    # github.com/kahrendt/microWakeWord, publish the .json + .tflite pair
+    # somewhere reachable at build time, and add it here the same way as the two
+    # experiment models above.
     - model: ${stop_model_file}
       id: stop
       internal: true
@@ -501,10 +535,22 @@ micro_wake_word:
     # so an announce with an empty wake_word only matches a "*" mapping.
     - lambda: id(current_wake_word) = wake_word;
 
+    # React on screen FIRST, before anything that can block. The face changing
+    # is the fastest feedback available -- it beats the chime to the room by
+    # about a second.
+    - lambda: id(voice_assistant_phase) = ${voice_assist_awake_phase_id};
+    - script.execute: draw_display
+
     # --- Ctrlable Snapcast routing ---
-    # The chime goes to the room, not to this box. Fired first and not awaited:
-    # homeassistant.service is fire-and-forget, so the add-on's stream switch
-    # overlaps the local timing dance below instead of adding to it.
+    # The chime goes to the room, not to this box, and nothing is played locally
+    # at all any more.
+    #
+    # Playing it locally (silently, for its timing) is what produced the mute
+    # face on every wake word: an announcement starting while voice_assistant is
+    # not yet running is indistinguishable, to on_announcement, from the user
+    # starting media playback -- so it drew the muted page, then the idle page
+    # when the silent clip ended, and only then the listening page. Removing the
+    # local playback removes all three frames; the gap is now an explicit delay.
     - homeassistant.service:
         service: ctrlable_snapcast_tts.chime
         data:
@@ -513,20 +559,7 @@ micro_wake_word:
           chime: wake
           volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
 
-    # Still played locally, still silent, and still worth keeping: this is what
-    # paces the gap before the mic opens. Upstream uses the chime's own length as
-    # that delay, and the sink decodes in real time, so the timing survives the
-    # move to Snapcast even though the sound does not.
-    - script.execute:
-        id: play_sound
-        priority: true
-        sound_file: !lambda return id(wake_word_triggered_sound);
-
-    - wait_until:
-        condition:
-          - media_player.is_announcing:
-        timeout: 0.5s
-    # Announcement is finished and the I2S bus is free
+    # Nothing of ours is playing, but a previous reply might still be draining.
     - wait_until:
         - and:
             - not:
@@ -534,9 +567,7 @@ micro_wake_word:
             - not:
                 speaker.is_playing: null_speaker
 
-    # Snapcast's buffer puts the room's chime about a second behind the local
-    # one. Opening the mic on the local timing alone would catch the tail of the
-    # chime coming back through the room -- so hold for the difference.
+    # Hold the mic closed until the room's chime has come and gone.
     - delay: ${chime_lead_in}
 
     - voice_assistant.start:
@@ -578,6 +609,18 @@ voice_assistant:
   on_stt_vad_end:
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
     - script.execute: draw_display
+    # --- Ctrlable Snapcast routing ---
+    # wyoming's done.wav, the same sound the LVA satellites make here. It holds
+    # the zone's lock for ~1.5s (1.12s of audio + a shortened drain); intent
+    # resolution has been measured at 2-9s, so it clears well before the answer
+    # wants the zone.
+    - homeassistant.service:
+        service: ctrlable_snapcast_tts.chime
+        data:
+          satellite_id: "${snapcast_satellite_id}"
+          wake_word: !lambda return id(current_wake_word);
+          chime: thinking
+          volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
   on_stt_end:
     - text_sensor.template.publish:
         id: text_request
@@ -653,10 +696,6 @@ voice_assistant:
                 wake_word: !lambda return id(current_wake_word);
                 chime: error
                 volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
-          - script.execute:
-              id: play_sound
-              priority: true
-              sound_file: !lambda return id(error_cloud_expired);
           - script.execute: draw_display
 
   on_client_connected:
@@ -823,10 +862,20 @@ display:
         lambda: |-
           it.fill(id(idle_color));
           it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_idle), ImageAlign::CENTER);
+          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
+          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
+                   id(mute).state ? "\U000F036D" : "\U000F036C");
+      - id: awake_page
+        lambda: |-
+          it.fill(id(awake_color));
+          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_awake), ImageAlign::CENTER);
       - id: listening_page
         lambda: |-
           it.fill(id(listening_color));
           it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_listening), ImageAlign::CENTER);
+          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
+          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
+                   id(mute).state ? "\U000F036D" : "\U000F036C");
       - id: thinking_page
         lambda: |-
           it.fill(id(thinking_color));
@@ -862,6 +911,9 @@ display:
         lambda: |-
           it.fill(Color::BLACK);
           it.image((it.get_width() / 2), (it.get_height() / 2), id(ctrlable_muted), ImageAlign::CENTER);
+          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
+          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
+                   id(mute).state ? "\U000F036D" : "\U000F036C");
 
 touchscreen:
   - platform: ft63x6
@@ -877,12 +929,27 @@ touchscreen:
       y_max: 240
     on_touch:
       - lambda: |-
-            ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
-                touch.x,
-                touch.y,
-                touch.x_raw,
-                touch.y_raw
-                );  
+            ESP_LOGD("touch", "x=%d, y=%d", touch.x, touch.y);
+      # A touch on a sleeping screen only wakes it. Waking and acting on the
+      # same tap means you cannot see what you are about to press.
+      - if:
+          condition:
+            lambda: return !id(lcd_backlight).current_values.is_on();
+          then:
+            - script.execute: screen_wake
+          else:
+            - script.execute: screen_wake
+            # Bottom-right corner, and only on the pages that draw the button.
+            # thinking/replying overlay text boxes exactly where it would sit.
+            - if:
+                condition:
+                  lambda: |-
+                    return touch.x >= 250 && touch.y >= 170
+                        && (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}
+                         || id(voice_assistant_phase) == ${voice_assist_muted_phase_id}
+                         || id(voice_assistant_phase) == ${voice_assist_listening_phase_id});
+                then:
+                  - switch.toggle: mute
 
 script:
   # --- Ctrlable Snapcast routing ------------------------------------------
@@ -971,6 +1038,10 @@ script:
 
   - id: draw_display
     then:
+      # Anything worth redrawing is worth looking at, so every redraw relights
+      # the screen and restarts the sleep countdown. The transition back to idle
+      # at the end of an exchange is itself a redraw, which is what re-arms it.
+      - script.execute: screen_wake
       - if:
           condition:
             lambda: return !id(init_in_progress);
@@ -985,6 +1056,10 @@ script:
                       then:
                         - lambda: |
                             switch(id(voice_assistant_phase)) {
+                              case ${voice_assist_awake_phase_id}:
+                                id(m5cores3_lcd).show_page(awake_page);
+                                id(m5cores3_lcd).update();
+                                break;
                               case ${voice_assist_listening_phase_id}:
                                 id(m5cores3_lcd).show_page(listening_page);
                                 id(m5cores3_lcd).update();
@@ -1062,6 +1137,26 @@ script:
           then:
             - micro_wake_word.stop:
 
+  # Screen blanking. One script, mode: restart -- every call relights and
+  # restarts the countdown, so there is no separate timer to keep in sync.
+  - id: screen_wake
+    mode: restart
+    then:
+      - light.turn_on:
+          id: lcd_backlight
+          brightness: 80%
+      - delay: ${screen_timeout}
+      # Only ever sleep from a resting phase. Without this a long answer would
+      # go dark mid-sentence, and the countdown is not restarted while the
+      # phase holds steady.
+      - if:
+          condition:
+            lambda: |-
+              return id(voice_assistant_phase) == ${voice_assist_idle_phase_id}
+                  || id(voice_assistant_phase) == ${voice_assist_muted_phase_id};
+          then:
+            - light.turn_off: lcd_backlight
+
   - id: set_idle_or_mute_phase
     then:
       - if:
@@ -1072,28 +1167,14 @@ script:
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
 
-  - id: play_sound
-    parameters:
-      priority: bool
-      sound_file: "audio::AudioFile*"
-    then:
-      - lambda: |-
-          if (priority) {
-            id(va_media_player)
-              ->make_call()
-              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
-              .set_announcement(true)
-              .perform();
-          }
-          if ( (id(va_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ) || priority) {
-            id(va_media_player)
-              ->play_file(sound_file, true, false);
-          }
-      - script.execute: stop_wake_word
-
 image:
   - file: ${error_illustration_file}
     id: casita_error
+    resize: 320x240
+    type: RGB
+    transparency: alpha_channel
+  - file: ${awake_illustration_file}
+    id: casita_awake
     resize: 320x240
     type: RGB
     transparency: alpha_channel
@@ -1159,12 +1240,15 @@ font:
     glyphsets:
       - ${font_glyphsets}
 
+  # Was mdi_icon_128 with a single 128px glyph that nothing drew -- dead flash.
+  # Now the on-screen mute button: two glyphs at a size that fits a corner.
   - file: ${mdi_webfont_file}
-    id: mdi_icon_128
-    size: 128
+    id: mdi_icon_36
+    size: 36
     bpp: 4
     glyphs:
-      - "\U000F036D" # mdi:mic-mute
+      - "\U000F036C" # mdi:microphone
+      - "\U000F036D" # mdi:microphone-off
 
 
 text_sensor:
@@ -1201,3 +1285,5 @@ color:
     hex: ${loading_illustration_background_color}
   - id: error_color
     hex: ${error_illustration_background_color}
+  - id: awake_color
+    hex: ${awake_illustration_background_color}

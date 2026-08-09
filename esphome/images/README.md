@@ -38,7 +38,7 @@ makes those white parts vanish. All six grounds are black now.
 ## Re-rendering
 
 ```sh
-for f in loading idle listening thinking replying alert no_wifi no_ha_file mute; do
+for f in loading idle listening thinking replying alert no_wifi no_ha_file mute awake; do
     rsvg-convert -h 440 "src/ctrlable_$f.svg" -o "/tmp/$f-2x.png"
 done
 # then scale each to 190px tall and centre on a 320x240 transparent canvas
@@ -57,6 +57,9 @@ done
 | no wifi | `ctrlable_no_wifi.png` |
 | no home assistant | `ctrlable_no_ha_file.png` |
 | muted | `ctrlable_mute.png` |
+| awake (wake word heard, mic not open yet) | `ctrlable_awake.png` |
 
-Unused but available in `src/`: `angry`, `awake`, `logo`, `powered_off`, `sleepy`,
+Unused but available in `src/`: `angry`, `logo`, `powered_off`, `sleepy`,
 `smiling`, `surprised`, `talking`, `timer`, `winking`.
+
+(The source arrived as `ctrlalbe_awake.svg`; renamed on the way in.)
