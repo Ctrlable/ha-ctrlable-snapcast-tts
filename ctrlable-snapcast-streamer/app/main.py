@@ -440,14 +440,26 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
 # keep working when the house has no internet. ffmpeg reads these straight off
 # disk, so a chime costs one stream switch and nothing else.
 _SOUNDS_DIR = Path(__file__).parent / "sounds"
-# wake/thinking are the LVA satellites' own awake.wav and done.wav, lifted
-# verbatim off the host (md5 7969eb81 / 48a48631, identical across all 13
-# wyoming-satellite installs) so every voice endpoint in the house sounds the
-# same. `thinking` is wyoming's done.wav -- it fires at end-of-capture, which is
-# the moment the assistant starts thinking.
+# The sounds the LVA zones actually play, taken from where the RUNNING service
+# is pointed:
+#     WAKEUP_SOUND=/root/lva-next/local/sounds/ctrlable_wake.flac
+#     PROCESSING_SOUND=/root/lva-next/local/sounds/ctrlable_processing.flac
+# (identical across all four zone .env files; md5 27607a7e / 1b76b2d4)
+#
+# These replace awake.wav/done.wav, which were WRONG. Those came from
+# /root/wyoming-satellite-3/sounds/ -- the legacy wyoming units, which are not
+# the running service. The active satellites are
+# ctrlable-voice-assistant-next@{family-room,living-room,master-bedroom,terrace}.
+# The md5s say it plainly: the "awake.wav" I shipped is byte-identical to
+# lva-next/sounds/wake_word_triggered_OLD.wav and "done.wav" to the stock
+# processing.wav -- i.e. the default Rhasspy chimes, which is exactly what they
+# sounded like in the room.
+#
+# Lesson for next time: match on what the live unit file references, not on a
+# plausible-looking file with the right name.
 _CHIMES = {
-    "wake": "awake.wav",
-    "thinking": "done.wav",
+    "wake": "ctrlable_wake.flac",
+    "thinking": "ctrlable_processing.flac",
     "timer": "timer_finished.flac",
     "error": "error_cloud_expired.mp3",
 }
