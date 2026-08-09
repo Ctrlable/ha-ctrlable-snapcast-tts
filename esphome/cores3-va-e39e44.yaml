@@ -836,6 +836,23 @@ script:
                 media_player.is_announcing:
             - not:
                 speaker.is_playing:
+    # Restore the volume HERE, and specifically not in start_wake_word.
+    #
+    # The media_player's own on_idle calls start_wake_word, and volume_set
+    # publishes a media_player state change -- so putting the restore there
+    # built an infinite loop: volume_set -> state change -> on_idle ->
+    # start_wake_word -> volume_set. Observed 23:47-23:48 as dozens of
+    # "IDLE / Volume: 61%" plus "Wake word detection is already running" per
+    # second, continuously. It also defeated the mute: on_tts_start set 0 and
+    # the loop immediately put it back to 0.61, which is why the answer played
+    # at full volume.
+    #
+    # This point is safe: it is past both wait_untils, so local playback has
+    # genuinely finished, and nothing here is reachable from a media_player
+    # state change.
+    - media_player.volume_set:
+        id: va_media_player
+        volume: !lambda return id(saved_volume);
     # Restart only mWW if enabled; streaming wake words automatically restart
     - if:
         condition:
@@ -952,12 +969,6 @@ script:
   # Starts either mWW or the streaming wake word, depending on the configured location
   - id: start_wake_word
     then:
-      # Restore volume here rather than in on_end: every exit -- normal, error,
-      # backstop, client reconnect -- passes through this script, so the device
-      # cannot get stranded silent. Cheap and idempotent.
-      - media_player.volume_set:
-          id: va_media_player
-          volume: !lambda return id(saved_volume);
       - if:
           condition:
             and:
