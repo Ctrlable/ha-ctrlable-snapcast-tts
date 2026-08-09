@@ -1,6 +1,6 @@
 slug: ctrlable_snapcast_streamer
 name: Ctrlable Snapcast TTS Streamer
-version: "0.1.39"
+version: "0.1.40"
 image: "ghcr.io/ctrlable/ctrlable-snapcast-streamer-{arch}"
 description: Stream Home Assistant Assist TTS responses to specific Snapcast clients with low-latency, UI-configurable routing.
 url: https://github.com/Ctrlable/ha-ctrlable-snapcast-tts

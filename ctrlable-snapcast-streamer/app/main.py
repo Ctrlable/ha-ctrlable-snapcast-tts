@@ -833,6 +833,10 @@ async def ui_mappings_add(
     wake_word: str = Form("*"),
     target_snapclient_ids: list[str] | None = Form(None),
     notes: str = Form(""),
+    # Set only when the form was opened via Edit. Carries the row's ORIGINAL
+    # key so a rename can be completed -- see below.
+    orig_satellite_id: str = Form(""),
+    orig_wake_word: str = Form(""),
 ):
     ids = target_snapclient_ids or []
     ingress = _ingress_path(request)
@@ -840,16 +844,29 @@ async def ui_mappings_add(
         return RedirectResponse(f"{ingress}/ui/mappings?msg=Satellite+ID+is+required&t=error", status_code=303)
     if not ids:
         return RedirectResponse(f"{ingress}/ui/mappings?msg=Select+at+least+one+target+client&t=error", status_code=303)
+
+    sat = satellite_id.strip()
+    ww = wake_word.strip() or "*"
+
     state = get_state()
-    state.mappings = _upsert_mapping(
-        state.mappings,
-        satellite_id.strip(),
-        wake_word.strip() or "*",
-        ids,
-        notes.strip(),
-    )
+    state.mappings = _upsert_mapping(state.mappings, sat, ww, ids, notes.strip())
+
+    # A mapping is keyed by (satellite_id, wake_word). Editing the targets or
+    # notes of a row is just an upsert onto the same key -- but editing either
+    # KEY field is not: the upsert above writes a new row and the original would
+    # survive as an orphan, silently double-routing that satellite. So when the
+    # form came from Edit and the key moved, drop the row it came from.
+    #
+    # Order matters: upsert first, delete second. The reverse would lose the
+    # mapping entirely if the upsert failed.
+    if orig_satellite_id and (orig_satellite_id != sat or orig_wake_word != ww):
+        state.mappings = _delete_mapping(state.mappings, orig_satellite_id, orig_wake_word)
+        msg = "Mapping+updated+(renamed)"
+    else:
+        msg = "Mapping+saved"
+
     save_state()
-    return RedirectResponse(f"{ingress}/ui/mappings?msg=Mapping+saved&t=ok", status_code=303)
+    return RedirectResponse(f"{ingress}/ui/mappings?msg={msg}&t=ok", status_code=303)
 
 
 @app.post("/ui/mappings/delete", response_class=HTMLResponse)

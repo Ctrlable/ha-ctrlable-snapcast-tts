@@ -25,6 +25,12 @@
   }
   .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 600px) { .field-row { grid-template-columns: 1fr; } }
+  /* Editing an existing row looks different from adding a new one -- without
+     this the form silently changes meaning and it is easy to overwrite a row
+     you meant to duplicate. */
+  #mapping-form.editing {
+    border-left: 3px solid var(--accent); padding-left: 14px;
+  }
   input[list] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238e8e93'/%3E%3C/svg%3E");
     background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; }
 </style>
@@ -34,8 +40,12 @@
 {% endif %}
 
 <div class="card">
-  <h2>Add / update mapping</h2>
+  <h2 id="form-heading">Add mapping</h2>
   <form method="post" action="{{ ingress_path }}/ui/mappings/add" id="mapping-form">
+    <!-- Populated only by Edit. Lets the backend finish a rename by removing
+         the row this edit started from; empty means "plain add". -->
+    <input type="hidden" name="orig_satellite_id" id="orig-sat" value="">
+    <input type="hidden" name="orig_wake_word" id="orig-ww" value="">
 
     <div class="field-row" style="margin-top:4px">
       <div>
@@ -98,11 +108,13 @@
         <label>Notes <span style="color:var(--muted);font-size:11px">(optional)</span></label>
         <input type="text" name="notes" placeholder="e.g. bedroom echo, only hey jarvis">
       </div>
-      <div style="display:flex;align-items:flex-end">
-        <button type="submit" class="btn-primary" style="width:100%"
+      <div style="display:flex;align-items:flex-end;gap:8px">
+        <button type="submit" class="btn-primary" style="flex:1" id="submit-btn"
                 {% if not enabled_clients %}disabled{% endif %}>
-          Add / Update Mapping
+          Add Mapping
         </button>
+        <button type="button" class="btn-sm btn-secondary" id="cancel-edit"
+                style="display:none;white-space:nowrap">Cancel</button>
       </div>
     </div>
   </form>
@@ -139,8 +151,14 @@
         {% endfor %}
       </td>
       <td style="color:var(--muted);font-size:12px">{{ m.notes or '' }}</td>
-      <td style="width:76px;text-align:right">
-        <form method="post" action="{{ ingress_path }}/ui/mappings/delete">
+      <td style="width:150px;text-align:right;white-space:nowrap">
+        <button type="button" class="btn-sm btn-secondary edit-btn"
+                data-sat="{{ m.satellite_id }}"
+                data-ww="{{ m.wake_word }}"
+                data-targets="{{ m.target_snapclient_ids|join(',') }}"
+                data-notes="{{ m.notes or '' }}">Edit</button>
+        <form method="post" action="{{ ingress_path }}/ui/mappings/delete"
+              style="display:inline">
           <input type="hidden" name="satellite_id" value="{{ m.satellite_id }}">
           <input type="hidden" name="wake_word" value="{{ m.wake_word }}">
           <button type="submit" class="btn-sm btn-secondary"
@@ -166,12 +184,64 @@
 </div>
 
 <script>
-  document.querySelectorAll('.client-card input[type=checkbox]').forEach(cb => {
-    function sync() {
+  function syncCards() {
+    document.querySelectorAll('.client-card input[type=checkbox]').forEach(cb => {
       cb.closest('.client-card').classList.toggle('checked', cb.checked);
-    }
-    cb.addEventListener('change', sync);
-    sync();
+    });
+  }
+  document.querySelectorAll('.client-card input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', syncCards);
   });
+  syncCards();
+
+  // --- Edit -----------------------------------------------------------
+  // Loads a row back into the one form rather than adding a second inline
+  // editor: the form already knows how to render clients, satellites and the
+  // wake-word list, and two places to build a mapping is two places to fix.
+  const form     = document.getElementById('mapping-form');
+  const heading  = document.getElementById('form-heading');
+  const submit   = document.getElementById('submit-btn');
+  const cancel   = document.getElementById('cancel-edit');
+  const origSat  = document.getElementById('orig-sat');
+  const origWw   = document.getElementById('orig-ww');
+  const satInput = document.querySelector('input[name=satellite_id]');
+  const wwInput  = document.querySelector('input[name=wake_word]');
+  const notesIn  = document.querySelector('input[name=notes]');
+
+  function resetForm() {
+    origSat.value = ''; origWw.value = '';
+    satInput.value = ''; wwInput.value = '*'; notesIn.value = '';
+    document.querySelectorAll('.client-card input[type=checkbox]')
+            .forEach(cb => { cb.checked = false; });
+    syncCards();
+    heading.textContent = 'Add mapping';
+    submit.textContent  = 'Add Mapping';
+    cancel.style.display = 'none';
+    form.classList.remove('editing');
+  }
+
+  document.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sat = btn.dataset.sat, ww = btn.dataset.ww;
+      // Remember the key we came from so the backend can complete a rename.
+      origSat.value = sat; origWw.value = ww;
+      satInput.value = sat; wwInput.value = ww;
+      notesIn.value = btn.dataset.notes || '';
+
+      const targets = (btn.dataset.targets || '').split(',').filter(Boolean);
+      document.querySelectorAll('.client-card input[type=checkbox]')
+              .forEach(cb => { cb.checked = targets.includes(cb.value); });
+      syncCards();
+
+      heading.textContent = 'Editing: ' + sat + '  (' + ww + ')';
+      submit.textContent  = 'Save Changes';
+      cancel.style.display = '';
+      form.classList.add('editing');
+      form.scrollIntoView({behavior: 'smooth', block: 'start'});
+      satInput.focus();
+    });
+  });
+
+  cancel.addEventListener('click', resetForm);
 </script>
 {% endblock %}
