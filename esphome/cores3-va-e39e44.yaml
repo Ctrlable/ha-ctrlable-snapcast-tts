@@ -1,7 +1,7 @@
 ---
 substitutions:
-  name: cores3-va-e39e44
-  friendly_name: M5Stack CoreS3 Voice Assistant e39e4
+  name: cores3-va
+  friendly_name: M5Stack CoreS3 Voice Assistant
 
   # Ctrlable expression set. Rendered from ctrlable_logo_expressions/*.svg to
   # 320x240 PNG with a TRANSPARENT ground and the art scaled to 190px tall --
@@ -122,7 +122,13 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2026.1.0
-  name_add_mac_suffix: false
+  # name_add_mac_suffix is ON: ESPHome appends "-AABBCC" from this device's MAC,
+  # so the node name -- and therefore the satellite id, which is App.get_name()
+  # at runtime -- is unique per unit with nothing to edit. That is what makes
+  # this file flashable to any number of identical devices.
+  #
+  # The base name must stay <= 24 characters (31 minus the 7-char suffix).
+  name_add_mac_suffix: true
   on_boot:
     - priority: 600
       then:
