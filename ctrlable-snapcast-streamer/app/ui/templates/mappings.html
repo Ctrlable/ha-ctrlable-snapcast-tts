@@ -39,6 +39,24 @@
 <div class="alert alert-{{ message_type }}" style="margin-bottom:16px">{{ message }}</div>
 {% endif %}
 
+{% if unmapped_seen %}
+<div class="card" style="border-left:3px solid var(--accent)">
+  <h2>Satellites waiting to be mapped</h2>
+  <p style="color:var(--muted);font-size:13px;margin-top:-4px">
+    These asked to announce and had no mapping. The id is taken verbatim from
+    what the device sent — click to load it into the form rather than typing it.
+  </p>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">
+    {% for sid, when in unmapped_seen %}
+    <button type="button" class="btn-sm btn-secondary claim-btn" data-sat="{{ sid }}"
+            style="font-family:ui-monospace,monospace;font-size:12px">
+      {{ sid }}
+    </button>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <h2 id="form-heading">Add mapping</h2>
   <form method="post" action="{{ ingress_path }}/ui/mappings/add" id="mapping-form">
@@ -257,5 +275,22 @@
   });
 
   cancel.addEventListener('click', resetForm);
+
+  // --- Claim an unmapped satellite -------------------------------------
+  // The id came off the wire, so putting it in the field verbatim removes the
+  // only step where a typo was possible. Deliberately does NOT set the hidden
+  // orig_* fields: this is a NEW mapping, not an edit of an existing row.
+  document.querySelectorAll('.claim-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      resetForm();
+      satInput.value = btn.dataset.sat;
+      heading.textContent = 'Mapping: ' + btn.dataset.sat;
+      form.classList.add('editing');
+      form.scrollIntoView({behavior: 'smooth', block: 'start'});
+      // Send them straight to the only decision left: which room(s).
+      const first = document.querySelector('.client-card input[type=checkbox]');
+      if (first) first.focus();
+    });
+  });
 </script>
 {% endblock %}
