@@ -16,7 +16,13 @@ from .api import (
     NoMatchingMappingError,
     SatelliteNotMappedError,
 )
-from .const import DOMAIN, EVENT_ANNOUNCED, SIGNAL_ANNOUNCING, SIGNAL_NEW_SATELLITE
+from .const import (
+    DOMAIN,
+    EVENT_ANNOUNCED,
+    SIGNAL_ANNOUNCING,
+    SIGNAL_ANNOUNCING_ANY,
+    SIGNAL_NEW_SATELLITE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,6 +112,7 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
         # a sensor stuck ON would leave that satellite wedged in "replying".
         async_dispatcher_send(hass, SIGNAL_NEW_SATELLITE, satellite_id)
         async_dispatcher_send(hass, SIGNAL_ANNOUNCING.format(satellite_id), True)
+        async_dispatcher_send(hass, SIGNAL_ANNOUNCING_ANY, satellite_id, True)
         try:
             results = await client.announce_by_satellite(
                 satellite_id, wake_word, url, source_host, volume
@@ -133,6 +140,7 @@ async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
             return
         finally:
             async_dispatcher_send(hass, SIGNAL_ANNOUNCING.format(satellite_id), False)
+            async_dispatcher_send(hass, SIGNAL_ANNOUNCING_ANY, satellite_id, False)
 
         hass.bus.async_fire(
             EVENT_ANNOUNCED,

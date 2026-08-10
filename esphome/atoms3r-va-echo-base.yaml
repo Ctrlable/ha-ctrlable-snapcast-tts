@@ -38,8 +38,9 @@ substitutions:
   # in the other. The integration names the completion sensor after whatever the
   # device sends, so a mismatch means the answer plays and the device never
   # learns it finished.
-  snapcast_satellite_id: atoms3r-with-echo-base
-  snapcast_announcing_entity: binary_sensor.atoms3r_with_echo_base_announcing
+
+  # Shared by every satellite -- identical string in all configs.
+  snapcast_announcing_entity: sensor.snapcast_announcing
   # Backstop only, for when HA is unreachable or the integration is too old to
   # expose the completion sensor. Never the normal path.
   announce_max_wait: 25s
@@ -126,7 +127,6 @@ wifi:
 
 captive_portal:
 
-
 logger:
   level: DEBUG
 
@@ -136,21 +136,6 @@ button:
     internal: true
 
 binary_sensor:
-  # --- Ctrlable Snapcast routing ---
-  # The end-of-playback signal. The integration holds this ON for exactly the
-  # span of the announce, and the add-on only returns once the room has stopped
-  # talking, so the ON->OFF edge is the real moment the answer ended. Without it
-  # the device can only guess with a timeout.
-  - platform: homeassistant
-    id: snapcast_announcing
-    entity_id: ${snapcast_announcing_entity}
-    internal: true
-    on_release:
-      - if:
-          condition:
-            lambda: return id(responding);
-          then:
-            - script.execute: finish_response
 
   - platform: gpio
     pin:
@@ -316,7 +301,7 @@ micro_wake_word:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.chime
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
           chime: wake
           volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
@@ -351,7 +336,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.hold
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
   on_stt_vad_end:
@@ -362,7 +347,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.chime
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
           chime: thinking
           volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
@@ -411,7 +396,7 @@ voice_assistant:
           - homeassistant.service:
               service: ctrlable_snapcast_tts.release
               data:
-                satellite_id: "${snapcast_satellite_id}"
+                satellite_id: !lambda return App.get_name();
                 wake_word: !lambda return id(current_wake_word);
           - script.execute: end_exchange_locally
 
@@ -427,7 +412,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.release
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
     - if:
         condition:
@@ -457,7 +442,7 @@ voice_assistant:
           - homeassistant.service:
               service: ctrlable_snapcast_tts.chime
               data:
-                satellite_id: "${snapcast_satellite_id}"
+                satellite_id: !lambda return App.get_name();
                 wake_word: !lambda return id(current_wake_word);
                 chime: error
                 volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
@@ -520,7 +505,7 @@ script:
           service: ctrlable_snapcast_tts.announce
           data:
             url: !lambda return id(last_tts_url);
-            satellite_id: "${snapcast_satellite_id}"
+            satellite_id: !lambda return App.get_name();
             wake_word: !lambda return id(current_wake_word);
             # The slider is published raw even though the DAC gets 0.0, so this
             # is the user's actual choice -- see the media_player comment.
@@ -711,7 +696,6 @@ select:
                       then:
                         - micro_wake_word.start
 
-
   - platform: template
     name: "Wake word sensitivity"
     id: wake_word_sensitivity
@@ -743,7 +727,6 @@ select:
           id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
         }
 
-
 globals:
   - id: init_in_progress
     type: bool
@@ -770,3 +753,39 @@ globals:
     restore_value: no
     initial_value: '""'
  
+
+text_sensor:
+  # --- Ctrlable Snapcast routing ---
+  # ONE entity shared by every satellite; its state lists whoever is currently
+  # announcing. Each device recognises itself at runtime via App.get_name(),
+  # which includes the MAC suffix when name_add_mac_suffix is on -- so this file
+  # holds nothing device-specific and can be flashed to any number of units.
+  #
+  # A per-device binary_sensor forced a hand-written entity id per device that
+  # had to agree with the id the device sends. That pairing is exactly what
+  # cannot be derived from a build-time mac suffix, and a mismatch is silent:
+  # the answer plays and the device never learns it finished.
+  #
+  # Exact token match, not substring: with mac-suffixed names "kitchen" IS a
+  # substring of "kitchen-a1b2c3", so find() would let one device release
+  # another device's hold.
+  - platform: homeassistant
+    id: snapcast_announcing_list
+    entity_id: ${snapcast_announcing_entity}
+    internal: true
+    on_value:
+      - lambda: |-
+          const std::string me = App.get_name();
+          bool mine = false;
+          size_t start = 0;
+          while (start <= x.size()) {
+            size_t comma = x.find(',', start);
+            std::string tok = x.substr(start, comma == std::string::npos
+                                              ? std::string::npos : comma - start);
+            if (tok == me) { mine = true; break; }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+          if (!mine && id(responding)) {
+            id(finish_response).execute();
+          }

@@ -94,7 +94,6 @@ substitutions:
   # Muted phase
   voice_assist_muted_phase_id: "12"
 
-
   # --- Ctrlable Snapcast routing -------------------------------------------
   # satellite_id sent to the add-on. MUST match a mapping registered at
   # POST /mappings, or every announce returns 404 "Satellite has no mapping".
@@ -127,12 +126,13 @@ substitutions:
   # in the other. The integration names the completion sensor after whatever the
   # device sends, so a mismatch means the answer plays and the device never
   # learns it finished.
-  snapcast_satellite_id: cores3-va-e39e44
+
   # Completion signal. The integration holds this ON for exactly the span of the
   # announce, and the add-on only returns once playback has finished -- so its
   # ON->OFF edge is the real end-of-playback moment. Entity id is derived from
   # the satellite_id by HA's slugify.
-  snapcast_announcing_entity: binary_sensor.cores3_va_e39e44_announcing
+  # Shared by every satellite -- identical string in all configs.
+  snapcast_announcing_entity: sensor.snapcast_announcing
   # Backstop only, for when HA is unreachable or the entity does not exist yet
   # (older integration build). Never the normal path.
   announce_max_wait: 25s
@@ -164,7 +164,6 @@ esphome:
             then:
               - lambda: id(init_in_progress) = false;
               - script.execute: draw_display
-
 
 esp32:
   variant: esp32s3
@@ -203,8 +202,6 @@ api:
     - script.execute: draw_display
   on_client_disconnected:
     - script.execute: draw_display
-
-
 
 ota:
   - platform: esphome
@@ -313,7 +310,6 @@ external_components:
     components: [axp2101, aw88298, aw9523b ]
     refresh: 0s
 
-
 # PMU
 sensor:
   - platform: axp2101
@@ -412,23 +408,6 @@ binary_sensor:
       then:
         - logger.log: "AW88298 interrupt triggered"
     internal: true
-
-  # --- Ctrlable Snapcast routing ---
-  # Mirrors the integration's per-satellite announcing sensor. ESPHome cannot
-  # subscribe to HA events, only entity state, which is why the integration
-  # exposes this as an entity rather than relying on its EVENT_ANNOUNCED.
-  - platform: homeassistant
-    id: snapcast_announcing
-    entity_id: ${snapcast_announcing_entity}
-    internal: true
-    on_release:
-      # ON -> OFF means the room has stopped talking. Guarded because this also
-      # fires when the entity first reports its (off) state at startup.
-      - if:
-          condition:
-            lambda: return id(responding);
-          then:
-            - script.execute: finish_response
 
 audio_adc:
   - platform: es7210
@@ -585,7 +564,7 @@ micro_wake_word:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.chime
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
           chime: wake
           volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
@@ -637,7 +616,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.hold
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - text_sensor.template.publish:
@@ -658,7 +637,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.chime
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
           chime: thinking
           volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
@@ -710,7 +689,7 @@ voice_assistant:
           - homeassistant.service:
               service: ctrlable_snapcast_tts.release
               data:
-                satellite_id: "${snapcast_satellite_id}"
+                satellite_id: !lambda return App.get_name();
                 wake_word: !lambda return id(current_wake_word);
           - script.execute: end_exchange_locally
   on_error:
@@ -725,7 +704,7 @@ voice_assistant:
     - homeassistant.service:
         service: ctrlable_snapcast_tts.release
         data:
-          satellite_id: "${snapcast_satellite_id}"
+          satellite_id: !lambda return App.get_name();
           wake_word: !lambda return id(current_wake_word);
     - if:
         condition:
@@ -755,7 +734,7 @@ voice_assistant:
           - homeassistant.service:
               service: ctrlable_snapcast_tts.chime
               data:
-                satellite_id: "${snapcast_satellite_id}"
+                satellite_id: !lambda return App.get_name();
                 wake_word: !lambda return id(current_wake_word);
                 chime: error
                 volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
@@ -771,7 +750,6 @@ voice_assistant:
     - script.execute: stop_wake_word
     - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id}; 
     - script.execute: draw_display
-
 
 switch:
   - platform: gpio
@@ -874,7 +852,6 @@ select:
                         switch.is_off: mute
                       then:
                         - micro_wake_word.start
-
 
   - platform: template
     name: "Wake word sensitivity"
@@ -1071,7 +1048,7 @@ script:
           service: ctrlable_snapcast_tts.announce
           data:
             url: !lambda return id(last_tts_url);
-            satellite_id: "${snapcast_satellite_id}"
+            satellite_id: !lambda return App.get_name();
             wake_word: !lambda return id(current_wake_word);
             # The volume control that actually does something. This device's
             # speaker is out of the path, so the slider has to reach the
@@ -1313,8 +1290,41 @@ font:
       - "\U000F036C" # mdi:microphone
       - "\U000F036D" # mdi:microphone-off
 
-
 text_sensor:
+  # --- Ctrlable Snapcast routing ---
+  # ONE entity shared by every satellite; its state lists whoever is currently
+  # announcing. Each device recognises itself at runtime via App.get_name(),
+  # which includes the MAC suffix when name_add_mac_suffix is on -- so this file
+  # holds nothing device-specific and can be flashed to any number of units.
+  #
+  # A per-device binary_sensor forced a hand-written entity id per device that
+  # had to agree with the id the device sends. That pairing is exactly what
+  # cannot be derived from a build-time mac suffix, and a mismatch is silent:
+  # the answer plays and the device never learns it finished.
+  #
+  # Exact token match, not substring: with mac-suffixed names "kitchen" IS a
+  # substring of "kitchen-a1b2c3", so find() would let one device release
+  # another device's hold.
+  - platform: homeassistant
+    id: snapcast_announcing_list
+    entity_id: ${snapcast_announcing_entity}
+    internal: true
+    on_value:
+      - lambda: |-
+          const std::string me = App.get_name();
+          bool mine = false;
+          size_t start = 0;
+          while (start <= x.size()) {
+            size_t comma = x.find(',', start);
+            std::string tok = x.substr(start, comma == std::string::npos
+                                              ? std::string::npos : comma - start);
+            if (tok == me) { mine = true; break; }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+          if (!mine && id(responding)) {
+            id(finish_response).execute();
+          }
   - id: text_request
     platform: template
     on_value:
