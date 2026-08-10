@@ -21,6 +21,30 @@ def resolve(mappings: list[dict], satellite_id: str, wake_word: str | None) -> l
     Wake word comparison is case-insensitive; underscores/hyphens equal spaces.
     """
     candidates = [m for m in mappings if m["satellite_id"] == satellite_id]
+
+    if not candidates:
+        # Tolerate the two ways a satellite can be named, because they are not
+        # interchangeable and getting it wrong fails SILENTLY: HTTP 200 from HA,
+        # no group switch, no sound. A device knows its own ESPHome node name
+        # ("esphome-web-75357c-xiao-esp32s3"); HA knows an entity slug that also
+        # carries the friendly name and area ("bedroom-3-esphome-web-...-assist-
+        # satellite"). Mappings get created from HA's list, devices send what
+        # they know, and the two never meet.
+        #
+        # Match when one is contained in the other, and ONLY when exactly one
+        # mapping qualifies -- an ambiguous match would route audio to the wrong
+        # room, which is worse than not routing it at all.
+        norm = _norm(satellite_id)
+        loose = [m for m in mappings
+                 if norm and (norm in _norm(m["satellite_id"])
+                              or _norm(m["satellite_id"]) in norm)]
+        if len(loose) == 1:
+            candidates = loose
+        elif len(loose) > 1:
+            raise SatelliteNotMappedError(
+                f"{satellite_id} matches {len(loose)} mappings ambiguously; "
+                f"make the satellite_id exact")
+
     if not candidates:
         raise SatelliteNotMappedError(satellite_id)
 

@@ -41,8 +41,16 @@ substitutions:
   # every announce returns 404. The target zone is NOT in this file: the device
   # only sends its own id and the add-on decides where the audio goes, so moving
   # this satellite between rooms is a mapping change, not a reflash.
-  snapcast_satellite_id: respeaker-xvf3800-assistant-assist-satellite
-  snapcast_announcing_entity: binary_sensor.respeaker_xvf3800_assistant_assist_satellite_announcing
+  # CONFIRMED AGAINST THE LIVE DEVICE, not predicted. The node name was kept as
+  # esphome-web-75357c-xiao-esp32s3 rather than renamed, so HA's slug is the one
+  # below -- the friendly-name guess (respeaker-xvf3800-assistant-...) matched
+  # nothing and every announce silently hit an unmapped satellite: HTTP 200 from
+  # HA, no group switch, no sound. Verified by watching snapserver:
+  #   respeaker-xvf3800-assistant-...  -> no group switched
+  #   bedroom-3-esphome-web-...        -> groups switched
+  # If the node is ever renamed, BOTH lines below change with it.
+  snapcast_satellite_id: bedroom-3-esphome-web-75357c-xiao-esp32s3-assist-satellite
+  snapcast_announcing_entity: binary_sensor.bedroom_3_esphome_web_75357c_xiao_esp32s3_assist_satellite_announcing
   # Backstop for when HA is unreachable or the integration is too old to expose
   # the completion sensor. Never the normal path.
   announce_max_wait: 25s
@@ -52,12 +60,17 @@ substitutions:
   chime_lead_in: 250ms
 
 esphome:
-  name: respeaker-xvf3800-assistant
-  friendly_name: reSpeaker XVF3800 Assistant
+  name: esphome-web-75357c-xiao-esp32s3
+  friendly_name: ESPHome Web 75357c XIAO ESP32S3
+  min_version: 2026.6.0
+  name_add_mac_suffix: false
+
+  #name: respeaker-xvf3800-assistant
+  #friendly_name: reSpeaker XVF3800 Assistant
   project:
     name: formatbce.Respeaker XVF3800 Satellite
     version: 2026.6.0
-  min_version: 2026.6.0
+  #min_version: 2026.6.0
   on_boot:
     - priority: 375
       then:
@@ -175,7 +188,7 @@ api:
 ota:
   - platform: esphome
     id: ota_esphome
-    password: !secret ota_password
+    #password: !secret ota_password
 
 i2c:
   - id: internal_i2c
