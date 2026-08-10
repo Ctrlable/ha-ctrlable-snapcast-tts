@@ -401,6 +401,7 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
     try:
         target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
     except SatelliteNotMappedError:
+        _note_unmapped(body.satellite_id)
         raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping") from None
     except NoMatchingMappingError:
         raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}") from None
@@ -442,6 +443,24 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
 # device heard you -- so it cannot wait on a GitHub round-trip, and it has to
 # keep working when the house has no internet. ffmpeg reads these straight off
 # disk, so a chime costs one stream switch and nothing else.
+# Satellite ids that asked to announce and had no mapping, newest first.
+#
+# The Mappings dropdown is built from HA's assist_satellite entities, whose slugs
+# carry the friendly name and area. A device sends whatever ITS config calls
+# itself, which need not be that -- so the id you actually need to map is often
+# the one NOT in the list, and nothing told you what it was. These are exactly
+# those ids: something tried to use them and failed.
+_unmapped_seen: dict[str, str] = {}
+
+
+def _note_unmapped(satellite_id: str) -> None:
+    if not satellite_id:
+        return
+    _unmapped_seen[satellite_id] = datetime.now(UTC).isoformat(timespec="seconds")
+    while len(_unmapped_seen) > 12:
+        _unmapped_seen.pop(next(iter(_unmapped_seen)))
+
+
 _SOUNDS_DIR = Path(__file__).parent / "sounds"
 # The sounds the LVA zones actually play, taken from where the RUNNING service
 # is pointed:
@@ -518,6 +537,7 @@ async def api_announce_chime(body: AnnounceChimeBody) -> list[dict]:
     try:
         target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
     except SatelliteNotMappedError:
+        _note_unmapped(body.satellite_id)
         raise HTTPException(status_code=404, detail=f"Satellite {body.satellite_id!r} has no mapping") from None
     except NoMatchingMappingError:
         raise HTTPException(status_code=422, detail=f"No mapping for satellite={body.satellite_id!r} wake_word={body.wake_word!r}") from None
@@ -554,6 +574,7 @@ async def api_hold(body: ReleaseBody) -> dict:
     try:
         target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
     except (SatelliteNotMappedError, NoMatchingMappingError):
+        _note_unmapped(body.satellite_id)
         return {"held": []}
     held = []
     for cid in target_ids:
@@ -574,6 +595,7 @@ async def api_release(body: ReleaseBody) -> dict:
     try:
         target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
     except (SatelliteNotMappedError, NoMatchingMappingError):
+        _note_unmapped(body.satellite_id)
         return {"released": []}
     released = []
     for cid in target_ids:
@@ -868,6 +890,7 @@ async def ui_mappings(request: Request):
         "enabled_clients": enabled_clients,
         "client_names": client_names,
         "ha_satellites": ha_satellites,
+        "unmapped_seen": sorted(_unmapped_seen.items(), key=lambda kv: kv[1], reverse=True),
         "ha_satellite_names": ha_satellite_names,
         "message": request.query_params.get("msg"),
         "message_type": request.query_params.get("t", "ok"),

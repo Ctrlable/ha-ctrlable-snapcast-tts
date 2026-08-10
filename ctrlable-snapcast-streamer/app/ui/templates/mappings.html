@@ -54,16 +54,30 @@
                list="sat-list" autocomplete="off" required
                placeholder="{% if ha_satellites %}Start typing to search…{% else %}m5stack-atom-echo-a14640{% endif %}">
         <datalist id="sat-list">
+          {# Ids that tried to announce and had no mapping come FIRST: if you are
+             on this page because something did not play, that is the id you
+             need, and it is precisely the one HA's entity list does not have. #}
+          {% for sid, when in unmapped_seen %}
+          <option value="{{ sid }}">sent by a device — not yet mapped</option>
+          {% endfor %}
           {% for s in ha_satellites %}
           <option value="{{ s.id }}">{{ s.name }}</option>
           {% endfor %}
         </datalist>
         <div style="font-size:11px;color:var(--muted);margin-top:4px">
-          {% if ha_satellites %}
-          {{ ha_satellites|length }} satellite(s) found in Home Assistant
-          {% else %}
-          No <code>assist_satellite</code> entities found — enter the ESPHome device name manually
+          {% if unmapped_seen %}
+          <span style="color:var(--accent)">
+            {{ unmapped_seen|length }} id(s) tried to announce with no mapping:
+            {% for sid, when in unmapped_seen %}<code>{{ sid }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+          </span><br>
           {% endif %}
+          {% if ha_satellites %}
+          {{ ha_satellites|length }} satellite(s) found in Home Assistant.
+          {% else %}
+          No <code>assist_satellite</code> entities found.
+          {% endif %}
+          This field is free text — a device sends whatever its own config calls
+          it, which need not match HA's entity name.
         </div>
       </div>
       <div>
