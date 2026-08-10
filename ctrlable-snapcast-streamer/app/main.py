@@ -450,15 +450,18 @@ async def api_announce_by_satellite(body: AnnounceBySatelliteBody) -> list[dict]
 # itself, which need not be that -- so the id you actually need to map is often
 # the one NOT in the list, and nothing told you what it was. These are exactly
 # those ids: something tried to use them and failed.
-_unmapped_seen: dict[str, str] = {}
-
-
+#
+# Kept in persisted state rather than a module global. The first version was a
+# dict in memory and every add-on update wiped it -- which is precisely when
+# someone is on this page trying to map a new device.
 def _note_unmapped(satellite_id: str) -> None:
     if not satellite_id:
         return
-    _unmapped_seen[satellite_id] = datetime.now(UTC).isoformat(timespec="seconds")
-    while len(_unmapped_seen) > 12:
-        _unmapped_seen.pop(next(iter(_unmapped_seen)))
+    state = get_state()
+    state.unmapped_seen[satellite_id] = datetime.now(UTC).isoformat(timespec="seconds")
+    while len(state.unmapped_seen) > 12:
+        state.unmapped_seen.pop(next(iter(state.unmapped_seen)))
+    save_state()
 
 
 _SOUNDS_DIR = Path(__file__).parent / "sounds"
@@ -890,7 +893,7 @@ async def ui_mappings(request: Request):
         "enabled_clients": enabled_clients,
         "client_names": client_names,
         "ha_satellites": ha_satellites,
-        "unmapped_seen": sorted(_unmapped_seen.items(), key=lambda kv: kv[1], reverse=True),
+        "unmapped_seen": sorted(state.unmapped_seen.items(), key=lambda kv: kv[1], reverse=True),
         "ha_satellite_names": ha_satellite_names,
         "message": request.query_params.get("msg"),
         "message_type": request.query_params.get("t", "ok"),

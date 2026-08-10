@@ -50,6 +50,11 @@ class AppState:
     clients: dict[str, ClientState] = field(default_factory=dict)
     ports_in_use: list[int] = field(default_factory=list)
     mappings: list[dict] = field(default_factory=list)
+    # satellite_id -> ISO timestamp, for ids that announced with no mapping.
+    # PERSISTED, not in-memory: the add-on restarts on every update, which is
+    # exactly when someone is on the Mappings page trying to use this list. An
+    # in-memory version emptied itself at the worst possible moment.
+    unmapped_seen: dict[str, str] = field(default_factory=dict)
 
 
 _state: AppState | None = None
@@ -63,6 +68,7 @@ def _state_to_dict(state: AppState) -> dict:
         "clients": {k: asdict(v) for k, v in state.clients.items()},
         "ports_in_use": state.ports_in_use,
         "mappings": state.mappings,
+        "unmapped_seen": state.unmapped_seen,
     }
 
 
@@ -80,6 +86,7 @@ def _state_from_dict(d: dict) -> AppState:
         },
         ports_in_use=d.get("ports_in_use", []),
         mappings=d.get("mappings", []),
+        unmapped_seen=d.get("unmapped_seen", {}),
     )
 
 
