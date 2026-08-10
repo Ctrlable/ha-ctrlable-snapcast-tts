@@ -55,8 +55,30 @@ substitutions:
   # device cannot know and which changes when you rename or move the device.
   # Keying off it makes the firmware depend on HA-side naming; keying off a
   # label we choose does not.
-  snapcast_satellite_id: respeaker-xvf3800-assistant-assist-satellite
-  snapcast_announcing_entity: binary_sensor.respeaker_xvf3800_assistant_assist_satellite_announcing
+  # --- Ctrlable Snapcast routing: satellite identity ------------------------
+  # satellite_id IS THE ESPHOME NODE NAME. Not the model, not HA's entity slug.
+  #
+  # Model-derived ids collide. "respeaker-xvf3800-assistant" and
+  # "atoms3r-echo-base-voice-assistant" say what a device IS, not which one it
+  # is, so a second unit of the same model sends a byte-identical id and both
+  # map to one zone -- and nothing detects it, because a mapping lookup that
+  # matches is indistinguishable from a mapping lookup that matches the RIGHT
+  # device.
+  #
+  # The node name is unique by construction: ESPHome enforces uniqueness on the
+  # network, and adding a second unit forces you to pick a new one. It is also
+  # device-scoped rather than room-scoped, so moving this satellite to another
+  # room stays a mapping change and does not make the id a lie.
+  #
+  # NOT HA's assist_satellite slug: that carries the friendly name and area,
+  # which the device cannot know and which changes when you rename or move it.
+  #
+  # THE TWO LINES BELOW MUST AGREE -- same string, hyphens in one, underscores
+  # in the other. The integration names the completion sensor after whatever the
+  # device sends, so a mismatch means the answer plays and the device never
+  # learns it finished.
+  snapcast_satellite_id: esphome-web-75357c-xiao-esp32s3
+  snapcast_announcing_entity: binary_sensor.esphome_web_75357c_xiao_esp32s3_announcing
   # Backstop for when HA is unreachable or the integration is too old to expose
   # the completion sensor. Never the normal path.
   announce_max_wait: 25s

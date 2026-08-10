@@ -105,12 +105,34 @@ substitutions:
   # then suffixes with "-assist-satellite". Verified against the live add-on:
   #   GET /mappings -> m5stack-cores3-voice-assistant-e39e44-assist-satellite
   # Same shape as the LVA satellites (lva-family-room-assist-satellite).
-  snapcast_satellite_id: m5stack-cores3-voice-assistant-e39e44-assist-satellite
+  # --- Ctrlable Snapcast routing: satellite identity ------------------------
+  # satellite_id IS THE ESPHOME NODE NAME. Not the model, not HA's entity slug.
+  #
+  # Model-derived ids collide. "respeaker-xvf3800-assistant" and
+  # "atoms3r-echo-base-voice-assistant" say what a device IS, not which one it
+  # is, so a second unit of the same model sends a byte-identical id and both
+  # map to one zone -- and nothing detects it, because a mapping lookup that
+  # matches is indistinguishable from a mapping lookup that matches the RIGHT
+  # device.
+  #
+  # The node name is unique by construction: ESPHome enforces uniqueness on the
+  # network, and adding a second unit forces you to pick a new one. It is also
+  # device-scoped rather than room-scoped, so moving this satellite to another
+  # room stays a mapping change and does not make the id a lie.
+  #
+  # NOT HA's assist_satellite slug: that carries the friendly name and area,
+  # which the device cannot know and which changes when you rename or move it.
+  #
+  # THE TWO LINES BELOW MUST AGREE -- same string, hyphens in one, underscores
+  # in the other. The integration names the completion sensor after whatever the
+  # device sends, so a mismatch means the answer plays and the device never
+  # learns it finished.
+  snapcast_satellite_id: cores3-va-e39e44
   # Completion signal. The integration holds this ON for exactly the span of the
   # announce, and the add-on only returns once playback has finished -- so its
   # ON->OFF edge is the real end-of-playback moment. Entity id is derived from
   # the satellite_id by HA's slugify.
-  snapcast_announcing_entity: binary_sensor.m5stack_cores3_voice_assistant_e39e44_assist_satellite_announcing
+  snapcast_announcing_entity: binary_sensor.cores3_va_e39e44_announcing
   # Backstop only, for when HA is unreachable or the entity does not exist yet
   # (older integration build). Never the normal path.
   announce_max_wait: 25s
