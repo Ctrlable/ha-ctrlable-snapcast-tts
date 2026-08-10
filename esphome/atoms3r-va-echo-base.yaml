@@ -16,33 +16,20 @@ substitutions:
   # returns 404. The TARGET ZONE IS NOT IN THIS FILE -- the device only ever
   # sends its own id, and the add-on decides where the audio goes, so moving
   # this satellite to another room is a mapping change, not a reflash.
-  # --- Ctrlable Snapcast routing: satellite identity ------------------------
-  # satellite_id IS THE ESPHOME NODE NAME. Not the model, not HA's entity slug.
+  # --- Ctrlable Snapcast routing: identity ---------------------------------
+  # There is no satellite_id here on purpose. The device sends its own name at
+  # runtime -- `!lambda return App.get_name();` -- which includes the MAC suffix
+  # when name_add_mac_suffix is on. So this file holds nothing device-specific
+  # and can be flashed to any number of units.
   #
-  # Model-derived ids collide. "respeaker-xvf3800-assistant" and
-  # "atoms3r-echo-base-voice-assistant" say what a device IS, not which one it
-  # is, so a second unit of the same model sends a byte-identical id and both
-  # map to one zone -- and nothing detects it, because a mapping lookup that
-  # matches is indistinguishable from a mapping lookup that matches the RIGHT
-  # device.
-  #
-  # The node name is unique by construction: ESPHome enforces uniqueness on the
-  # network, and adding a second unit forces you to pick a new one. It is also
-  # device-scoped rather than room-scoped, so moving this satellite to another
-  # room stays a mapping change and does not make the id a lie.
-  #
-  # NOT HA's assist_satellite slug: that carries the friendly name and area,
-  # which the device cannot know and which changes when you rename or move it.
-  #
-  # THE TWO LINES BELOW MUST AGREE -- same string, hyphens in one, underscores
-  # in the other. The integration names the completion sensor after whatever the
-  # device sends, so a mismatch means the answer plays and the device never
-  # learns it finished.
-
-  # Shared by every satellite -- identical string in all configs.
+  # The completion signal is ONE entity shared by every satellite, listing who
+  # is announcing; each device recognises itself by name. It used to be a
+  # per-device binary_sensor, which forced a hand-written entity id that had to
+  # agree with the id the device sent -- unmaintainable across devices, and
+  # impossible to combine with a build-time MAC suffix.
   snapcast_announcing_entity: sensor.snapcast_announcing
-  # Backstop only, for when HA is unreachable or the integration is too old to
-  # expose the completion sensor. Never the normal path.
+  # Backstop only, for when HA is unreachable or the shared sensor does not
+  # exist yet (older integration build). Never the normal path.
   announce_max_wait: 25s
   # Mic opens this long after the wake word. The chime is audible in the room
   # ~0.45s after the service call (add-on overhead + 60ms padding + the
