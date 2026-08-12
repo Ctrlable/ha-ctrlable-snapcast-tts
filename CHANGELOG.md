@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.51] — 2026-08-12
+
+### Added
+- **The integration now tells the streamer which satellites Home Assistant
+  knows about.** On startup and whenever an `assist_satellite` entity is added
+  or removed, it pushes a roster — entity id, friendly name, area, and every
+  candidate satellite id it can see.
+
+  This replaces the one capability that breaks when the streamer runs outside
+  Home Assistant. It used to read the entity registry itself via
+  `http://supervisor/core/api/states`, which works only for an add-on, where the
+  Supervisor injects a token. **A long-lived HA token was deliberately not used
+  as the replacement** — those grant full control of every entity in the house
+  in exchange for populating a list, and the trust today runs one way only: the
+  integration authenticates to the streamer, which holds no HA credential at all.
+
+  The roster is display data, not routing. A device sends its ESPHome node name
+  (`atoms3r-echo-bca1a8`); HA knows an entity slug carrying the friendly name
+  and a platform suffix (`assist_satellite.atoms3r_echo_base_voice_assistant_assist_satellite`).
+  Those are different strings for the same device, so each entry carries a list
+  of candidates rather than a single guess, and the streamer resolves against
+  the ids it has actually seen devices send.
+
+  Best-effort throughout: a streamer that is down or slow cannot disturb Home
+  Assistant startup, and the streamer's existing "record whatever calls in
+  without a mapping" behaviour remains the backstop that always works. The
+  roster only makes a satellite appear *before* it has spoken.
+
+  Requires the streamer to expose `POST /satellites` (ctrlable-announce, or a
+  future add-on build); older streamers simply reject it and the push is logged
+  at debug and forgotten.
+
 ## [0.1.50] — 2026-08-12
 
 ### Added
