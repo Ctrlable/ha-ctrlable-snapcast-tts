@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.50] — 2026-08-12
+
+### Added
+- **Each satellite can now be routed to its own streamer.** A config entry may
+  name the satellite ids it serves; resolution runs most specific first — an
+  entry that names the satellite, else an entry with an empty list (the
+  catch-all), else the first entry.
+
+  This exists to make migrating one room at a time possible. `_get_client()`
+  previously returned `next(iter(entries))`, so a single streamer served every
+  satellite and changing its URL moved all four rooms at once — if anything
+  regressed, everything regressed together.
+
+  **Existing installs are unaffected.** A lone entry has no satellites list, so
+  it is the catch-all and answers for everything exactly as before. Nothing
+  changes until a second entry is added.
+
+  Matching is exact, deliberately: `atoms3r` is a prefix of
+  `atoms3r-echo-bca1a8`, and with fuzzy matching an entry claiming the short
+  name would silently capture the longer satellite — audio would simply go to
+  the wrong streamer, with no error anywhere.
+
+  Multiple config entries are now permitted (duplicate URLs are still refused,
+  since two entries pointing at the same streamer is a mistake rather than a
+  migration), and entries are titled by their satellites or URL so the wrong one
+  is harder to edit by accident.
+
 ## [0.1.31] — 2026-08-09
 
 ### Fixed

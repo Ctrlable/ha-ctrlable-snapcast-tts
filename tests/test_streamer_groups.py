@@ -46,6 +46,10 @@ snapcast_mod = types.ModuleType("snapcast")
 class SnapGroup:
     id: str
     stream_id: str
+    # announce() locates the group by MEMBERSHIP, not by the id cached in state,
+    # because snapserver regenerates group ids on every restart (0.1.31). The
+    # stub needs this field or no group ever matches and the switch is skipped.
+    client_ids: list[str] = field(default_factory=list)
 
 _snap_instance = MagicMock()
 snapcast_mod.get_client = lambda: _snap_instance
@@ -91,9 +95,19 @@ def _setup_state(cs: ClientState) -> None:
 
 
 def _mock_snap(current_stream: str) -> MagicMock:
-    """Return a mock SnapcastClient where the group is bound to `current_stream`."""
+    """Return a mock SnapcastClient where the group is bound to `current_stream`.
+
+    client_ids MUST be populated. announce() finds the group by MEMBERSHIP -- the
+    group that currently contains this client -- rather than by the id cached in
+    state, because snapserver regenerates group ids on every restart and the
+    cached one goes stale (fixed in 0.1.31, where the stale id caused
+    announcements to be silently skipped). A group without client_ids therefore
+    matches nothing and the stream switch never happens.
+    """
     snap = MagicMock()
-    snap.list_groups = AsyncMock(return_value=[SnapGroup(id=GROUP_ID, stream_id=current_stream)])
+    snap.list_groups = AsyncMock(return_value=[
+        SnapGroup(id=GROUP_ID, stream_id=current_stream, client_ids=[CLIENT_ID])
+    ])
     snap.set_group_stream = AsyncMock()
     return snap
 
@@ -109,11 +123,16 @@ async def test_switches_stream_when_on_airplay():
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
-        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock()),
-        patch.object(streamer, "asyncio") as mock_asyncio,
+        # 48000 Hz x 2 ch x 2 bytes = 192000 B/s, so this is exactly 1.0s of audio.
+        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock(return_value=192000)),
+        # Patch ONLY asyncio.sleep, never the whole module. Replacing
+        # streamer.asyncio wholesale broke these tests the moment the sticky
+        # group feature started using asyncio.create_task: the restore is
+        # wrapped in contextlib.suppress(Exception), so a mock-induced error was
+        # swallowed and the assertion saw no restore call -- reporting a
+        # restore bug that did not exist.
+        patch.object(streamer.asyncio, "sleep", new=AsyncMock()),
     ):
-        mock_asyncio.sleep = AsyncMock()
-        mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
@@ -132,11 +151,16 @@ async def test_switches_stream_when_on_music_assistant():
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
-        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock()),
-        patch.object(streamer, "asyncio") as mock_asyncio,
+        # 48000 Hz x 2 ch x 2 bytes = 192000 B/s, so this is exactly 1.0s of audio.
+        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock(return_value=192000)),
+        # Patch ONLY asyncio.sleep, never the whole module. Replacing
+        # streamer.asyncio wholesale broke these tests the moment the sticky
+        # group feature started using asyncio.create_task: the restore is
+        # wrapped in contextlib.suppress(Exception), so a mock-induced error was
+        # swallowed and the assertion saw no restore call -- reporting a
+        # restore bug that did not exist.
+        patch.object(streamer.asyncio, "sleep", new=AsyncMock()),
     ):
-        mock_asyncio.sleep = AsyncMock()
-        mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
@@ -154,11 +178,16 @@ async def test_no_stream_switch_when_already_on_announce_stream():
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
-        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock()),
-        patch.object(streamer, "asyncio") as mock_asyncio,
+        # 48000 Hz x 2 ch x 2 bytes = 192000 B/s, so this is exactly 1.0s of audio.
+        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock(return_value=192000)),
+        # Patch ONLY asyncio.sleep, never the whole module. Replacing
+        # streamer.asyncio wholesale broke these tests the moment the sticky
+        # group feature started using asyncio.create_task: the restore is
+        # wrapped in contextlib.suppress(Exception), so a mock-induced error was
+        # swallowed and the assertion saw no restore call -- reporting a
+        # restore bug that did not exist.
+        patch.object(streamer.asyncio, "sleep", new=AsyncMock()),
     ):
-        mock_asyncio.sleep = AsyncMock()
-        mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
@@ -175,10 +204,14 @@ async def test_restore_happens_on_stream_error():
     with (
         patch.object(streamer, "get_snap", return_value=snap),
         patch.object(streamer, "_stream_ffmpeg", new=AsyncMock(side_effect=RuntimeError("stream broke"))),
-        patch.object(streamer, "asyncio") as mock_asyncio,
+        # Patch ONLY asyncio.sleep, never the whole module. Replacing
+        # streamer.asyncio wholesale broke these tests the moment the sticky
+        # group feature started using asyncio.create_task: the restore is
+        # wrapped in contextlib.suppress(Exception), so a mock-induced error was
+        # swallowed and the assertion saw no restore call -- reporting a
+        # restore bug that did not exist.
+        patch.object(streamer.asyncio, "sleep", new=AsyncMock()),
     ):
-        mock_asyncio.sleep = AsyncMock()
-        mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
         with pytest.raises(RuntimeError):
             await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
@@ -196,11 +229,16 @@ async def test_no_switch_when_announce_stream_id_not_configured():
 
     with (
         patch.object(streamer, "get_snap", return_value=snap),
-        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock()),
-        patch.object(streamer, "asyncio") as mock_asyncio,
+        # 48000 Hz x 2 ch x 2 bytes = 192000 B/s, so this is exactly 1.0s of audio.
+        patch.object(streamer, "_stream_ffmpeg", new=AsyncMock(return_value=192000)),
+        # Patch ONLY asyncio.sleep, never the whole module. Replacing
+        # streamer.asyncio wholesale broke these tests the moment the sticky
+        # group feature started using asyncio.create_task: the restore is
+        # wrapped in contextlib.suppress(Exception), so a mock-induced error was
+        # swallowed and the assertion saw no restore call -- reporting a
+        # restore bug that did not exist.
+        patch.object(streamer.asyncio, "sleep", new=AsyncMock()),
     ):
-        mock_asyncio.sleep = AsyncMock()
-        mock_asyncio.Lock = asyncio.Lock
         streamer._locks = {}
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
