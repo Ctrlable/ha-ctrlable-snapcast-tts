@@ -5,9 +5,12 @@ import logging
 from functools import partial
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 
 from .api import AddonApiClient
+from . import roster
 from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, CONF_SATELLITES, DOMAIN, PLATFORMS
 from .services import (
     ANNOUNCE_SCHEMA,
@@ -59,6 +62,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Push the satellite roster once HA has finished starting, then whenever the
+    # entity registry changes. Deferred to EVENT_HOMEASSISTANT_STARTED because at
+    # setup time the ESPHome entities may not be registered yet -- pushing then
+    # would send a roster missing exactly the satellites we care about.
+    async def _push_roster(_event=None) -> None:
+        await roster.push(hass, client)
+
+    if hass.state == CoreState.running:
+        entry.async_create_background_task(hass, _push_roster(), "ctrlable_roster_push")
+    else:
+        entry.async_on_unload(
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _push_roster)
+        )
+
+    @callback
+    def _registry_changed(event) -> None:
+        # Only entity ADD/REMOVE can change the roster; ignore state churn.
+        if event.data.get("action") in ("create", "remove") and str(
+            event.data.get("entity_id", "")
+        ).startswith("assist_satellite."):
+            entry.async_create_background_task(hass, _push_roster(), "ctrlable_roster_push")
+
+    entry.async_on_unload(
+        hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _registry_changed)
+    )
 
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True

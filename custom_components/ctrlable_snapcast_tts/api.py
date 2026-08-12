@@ -57,6 +57,19 @@ class AddonApiClient:
         result = await self._get("/health")
         return result if isinstance(result, dict) else {}
 
+    async def push_satellites(self, satellites: list[dict]) -> dict:
+        """Tell the streamer which satellites Home Assistant knows about.
+
+        Exists so the streamer can label and pre-populate its mapping page
+        without holding any Home Assistant credential. It used to read the
+        entity registry itself, but that only worked while it ran as an add-on
+        with a Supervisor-injected token; moved out of HA, that access is gone.
+        Pushing over the token the integration ALREADY holds keeps the trust
+        one-directional -- HA can call the streamer, the streamer holds nothing
+        of HA's.
+        """
+        return await self._post("/satellites", {"satellites": satellites})  # type: ignore[return-value]
+
     async def get_clients(self) -> list[dict]:
         result = await self._get("/snapcast/clients")
         return result if isinstance(result, list) else []
