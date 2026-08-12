@@ -55,11 +55,17 @@ substitutions:
 
   # Micro wake word models.
   #
-  # There is no "maya" model. The complete published set is okay_nabu,
-  # hey_jarvis, hey_mycroft and alexa (esphome/micro-wake-word-models v2), plus
-  # four experiments -- okay_computer, hey_home_assistant, hey_peppa_pig,
-  # choo_choo_homie. A custom word has to be trained; see the note in the models
-  # list below.
+  # "Hey Maya" and "Okay Maya" are OURS -- trained in ~/Projects/ctrlable-wakewords
+  # because no published "maya" model exists (the upstream set is okay_nabu,
+  # hey_jarvis, hey_mycroft, alexa, plus a few experiments). They are the only
+  # models here loaded from disk instead of a URL; the .json/.tflite pairs live
+  # in esphome/models/ and must be present in the ESPHome config directory at
+  # build time.
+  #
+  # There are ALSO openWakeWord builds of both words (hey_maya_oww,
+  # okay_maya_oww) running on the LVA zones. Those are a different architecture
+  # that micro_wake_word cannot load -- the two formats share a .tflite
+  # extension and nothing else. Same phrases, two independent models.
   #
   # COST OF ADDING MORE: every model runs inference on every audio frame, all
   # the time. Flash and PSRAM are not the constraint here, CPU is. If the device
@@ -96,12 +102,13 @@ substitutions:
   # Muted phase
   voice_assist_muted_phase_id: "12"
 
-  # --- Ctrlable Snapcast routing -------------------------------------------
   # --- Ctrlable Snapcast routing: identity ---------------------------------
-  # There is no satellite_id here on purpose. The device sends its own name at
-  # runtime -- `!lambda return App.get_name();` -- which includes the MAC suffix
-  # when name_add_mac_suffix is on. So this file holds nothing device-specific
-  # and can be flashed to any number of units.
+  # There is no satellite_id substitution here on purpose. The device sends its
+  # own node name at runtime -- `!lambda return App.get_name();` -- so the id can
+  # never drift out of step with a separately hand-typed string.
+  #
+  # With name_add_mac_suffix off (see below), that id is just `name`, so `name`
+  # is the one field to change when flashing a second unit.
   #
   # The completion signal is ONE entity shared by every satellite, listing who
   # is announcing; each device recognises itself by name. It used to be a
@@ -122,13 +129,14 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2026.1.0
-  # name_add_mac_suffix is ON: ESPHome appends "-AABBCC" from this device's MAC,
-  # so the node name -- and therefore the satellite id, which is App.get_name()
-  # at runtime -- is unique per unit with nothing to edit. That is what makes
-  # this file flashable to any number of identical devices.
+  # name_add_mac_suffix is OFF (user's call, 2026-08-11: its real purpose is
+  # provisioning/factory firmware).
   #
-  # The base name must stay <= 24 characters (31 minus the 7-char suffix).
-  name_add_mac_suffix: true
+  # CONSEQUENCE, since the satellite id is App.get_name() at runtime: the id is
+  # exactly `${name}` above, so this file is single-device as written. Flashing
+  # it to a SECOND unit without changing `name` gives both the same satellite id,
+  # and the add-on mapping cannot tell them apart. Change `name` per unit.
+  name_add_mac_suffix: false
   on_boot:
     - priority: 600
       then:
@@ -501,8 +509,25 @@ micro_wake_word:
   microphone: i2s_mic
   stop_after_detection: false
   models:
-    - model: ${okay_nabu_model_file}
-      id: okay_nabu
+    # OUR OWN MODEL, and the only one here loaded from disk rather than a URL --
+    # see esphome/models/. Trained 2026-08-10 in ~/Projects/ctrlable-wakewords;
+    # ~96% recall, cutoff 0.94 measured rather than guessed.
+    #
+    # It REPLACES okay_nabu rather than joining it. micro_wake_word runs every
+    # model on every frame, so the list is a CPU budget and not just flash; this
+    # keeps the count flat. To get okay_nabu back, restore the ${okay_nabu_model_file}
+    # line -- the substitution is still defined.
+    - model: models/hey_maya.json
+      id: hey_maya
+    # Trained 2026-08-11 at 30000 samples. The 2000-sample first attempt missed
+    # 11% of utterances and was never shipped; this one measures 4.8% miss at
+    # ZERO false accepts/hour on the quantized streaming model -- the same
+    # evaluation the device actually runs.
+    #
+    # Cutoff 0.98 rather than hey_maya's 0.94: "okay" is a far commoner word in
+    # ordinary speech than "hey", so it earns a stricter threshold.
+    - model: models/okay_maya.json
+      id: okay_maya
     - model: hey_jarvis
       id: hey_jarvis
     - model: hey_mycroft
@@ -513,10 +538,6 @@ micro_wake_word:
       id: okay_computer
     - model: ${hey_home_assistant_model_file}
       id: hey_home_assistant
-    # To add a custom word ("maya"), train it with the microWakeWord notebook at
-    # github.com/kahrendt/microWakeWord, publish the .json + .tflite pair
-    # somewhere reachable at build time, and add it here the same way as the two
-    # experiment models above.
     - model: ${stop_model_file}
       id: stop
       internal: true
@@ -849,18 +870,33 @@ select:
       # Sets specific wake word probabilities computed for each particular model
       # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
       # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
-      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      # These cutoffs apply only to the specific models included in the firmware:
+      # hey_maya@ctrlable-20260810, hey_jarvis@v2, hey_mycroft@v2.
+      #
+      # The hey_jarvis/hey_mycroft numbers are upstream's, measured against the
+      # Dinner Party Corpus. THE hey_maya NUMBERS ARE NOT MEASURED THAT WAY --
+      # there is no DipCo run for our model. They are scaled from its manifest
+      # cutoff of 0.94 (=240/255), which WAS measured, on the training set's own
+      # validation split. Treat them as a sensible spread, not as FAPH figures.
+      #
+      # THE okay_maya NUMBERS *ARE* MEASURED, unusually -- its 30000-sample run
+      # produced a real false-accept/false-reject sweep on the QUANTIZED STREAMING
+      # model, i.e. the artefact this device actually executes. Those FAPH figures
+      # are therefore directly comparable to upstream's DipCo ones.
       lambda: |-
         if (x == "Slightly sensitive") {
-          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_maya).set_probability_cutoff(240);     // 0.94 - our manifest default
+          id(okay_maya).set_probability_cutoff(252);    // 0.99 -> 4.77% miss, 0.000 FAPH (measured)
           id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
           id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
         } else if (x == "Moderately sensitive") {
-          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_maya).set_probability_cutoff(217);     // 0.85 - scaled, not DipCo-measured
+          id(okay_maya).set_probability_cutoff(250);    // 0.98 -> 3.97% miss, 0.187 FAPH (measured)
           id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
           id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
         } else if (x == "Very sensitive") {
-          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_maya).set_probability_cutoff(179);     // 0.70 - scaled, not DipCo-measured
+          id(okay_maya).set_probability_cutoff(242);    // 0.95 -> 2.80% miss, 0.562 FAPH (measured)
           id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
           id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
         }
@@ -1276,8 +1312,8 @@ text_sensor:
   # --- Ctrlable Snapcast routing ---
   # ONE entity shared by every satellite; its state lists whoever is currently
   # announcing. Each device recognises itself at runtime via App.get_name(),
-  # which includes the MAC suffix when name_add_mac_suffix is on -- so this file
-  # holds nothing device-specific and can be flashed to any number of units.
+  # so the id always matches the node actually running. With name_add_mac_suffix
+  # off it is simply `name`, which must therefore be unique per unit.
   #
   # A per-device binary_sensor forced a hand-written entity id per device that
   # had to agree with the id the device sends. That pairing is exactly what

@@ -220,3 +220,6 @@ __marimo__/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# ESPHome build cache (70MB+, regenerated on every build)
+esphome/.esphome/
