@@ -69,12 +69,44 @@ SET_MAPPING_SCHEMA = vol.Schema(
 )
 
 
-def _get_client(hass: HomeAssistant) -> AddonApiClient | None:
+def _get_client(hass: HomeAssistant, satellite_id: str = "") -> AddonApiClient | None:
+    """Pick the streamer that serves this satellite.
+
+    WHY THIS IS NOT JUST next(iter(entries)) ANY MORE. It used to be, which meant
+    one streamer served every satellite and the URL could only be changed for all
+    four rooms at once. That made migrating to a second streamer an all-or-nothing
+    cutover: if anything regressed, every room regressed together.
+
+    Resolution order, most specific first:
+
+      1. an entry that NAMES this satellite id in CONF_SATELLITES
+      2. an entry with an EMPTY CONF_SATELLITES -- the catch-all
+      3. the first entry, which is exactly the old behaviour
+
+    Rule 3 is what makes this change invisible to an existing install: a lone
+    entry has no satellites list, so it is the catch-all and answers for
+    everything, as before.
+
+    Matching is exact. A satellite id is what the device sends as
+    App.get_name(), so a prefix or fuzzy match would let a new satellite
+    silently steal another's route the moment someone names one as a prefix of
+    another -- the add-on's mapping resolver already had to grow an
+    ambiguity guard for precisely that reason.
+    """
     entries = hass.data.get(DOMAIN, {})
     if not entries:
         return None
-    entry_id = next(iter(entries))
-    return entries[entry_id]["client"]
+
+    if satellite_id:
+        for rec in entries.values():
+            if satellite_id in rec.get("satellites", ()):
+                return rec["client"]
+
+    for rec in entries.values():
+        if not rec.get("satellites"):
+            return rec["client"]
+
+    return entries[next(iter(entries))]["client"]
 
 
 def _source_host(hass: HomeAssistant) -> str:
@@ -87,7 +119,11 @@ def _source_host(hass: HomeAssistant) -> str:
 
 
 async def handle_announce(hass: HomeAssistant, call: ServiceCall) -> None:
-    client = _get_client(hass)
+    # Read the satellite id first: it is what SELECTS the streamer. A call that
+    # passes target_snapclient_ids instead has no satellite, so it falls through
+    # to the catch-all entry -- which is right, since those ids are meaningless
+    # without knowing which streamer's snapserver they belong to.
+    client = _get_client(hass, call.data.get("satellite_id", ""))
     if client is None:
         _LOGGER.error("ctrlable_snapcast_tts: integration not set up")
         return
@@ -180,12 +216,12 @@ async def handle_chime(hass: HomeAssistant, call: ServiceCall) -> None:
     opposite -- it fires as the exchange BEGINS. Raising it here would make the
     device think its answer had already arrived and finished.
     """
-    client = _get_client(hass)
+    satellite_id: str = call.data["satellite_id"]
+    client = _get_client(hass, satellite_id)
     if client is None:
         _LOGGER.error("ctrlable_snapcast_tts: integration not set up")
         return
 
-    satellite_id: str = call.data["satellite_id"]
     try:
         await client.announce_chime(
             satellite_id,
@@ -210,11 +246,12 @@ async def handle_hold(hass: HomeAssistant, call: ServiceCall) -> None:
     conversation -- which is the case the wake chime does not cover. Idempotent
     and fire-and-forget; the answer or a release lets go.
     """
-    client = _get_client(hass)
+    satellite_id: str = call.data["satellite_id"]
+    client = _get_client(hass, satellite_id)
     if client is None:
         return
     try:
-        await client.hold(call.data["satellite_id"], call.data.get("wake_word"))
+        await client.hold(satellite_id, call.data.get("wake_word"))
     except Exception as exc:  # noqa: BLE001 - never let this break an exchange
         _LOGGER.debug("ctrlable_snapcast_tts: hold failed — %s", exc)
 
@@ -227,22 +264,23 @@ async def handle_release(hass: HomeAssistant, call: ServiceCall) -> None:
     whether anything was actually held. Failures are logged at debug because a
     missed release self-heals via the add-on's watchdog.
     """
-    client = _get_client(hass)
+    satellite_id: str = call.data["satellite_id"]
+    client = _get_client(hass, satellite_id)
     if client is None:
         return
     try:
-        await client.release(call.data["satellite_id"], call.data.get("wake_word"))
+        await client.release(satellite_id, call.data.get("wake_word"))
     except Exception as exc:  # noqa: BLE001 - never let this break an exchange
         _LOGGER.debug("ctrlable_snapcast_tts: release failed — %s", exc)
 
 
 async def handle_set_mapping(hass: HomeAssistant, call: ServiceCall) -> None:
-    client = _get_client(hass)
+    satellite_id: str = call.data["satellite_id"]
+    client = _get_client(hass, satellite_id)
     if client is None:
         _LOGGER.error("ctrlable_snapcast_tts: integration not set up")
         return
 
-    satellite_id: str = call.data["satellite_id"]
     wake_word: str = call.data["wake_word"]
     target_ids: list[str] = call.data["target_snapclient_ids"]
     notes: str = call.data.get("notes", "")

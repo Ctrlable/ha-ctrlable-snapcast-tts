@@ -5,6 +5,11 @@ DOMAIN = "ctrlable_snapcast_tts"
 
 CONF_ADDON_URL = "addon_url"
 CONF_BEARER_TOKEN = "bearer_token"
+# Which satellites this entry serves. EMPTY MEANS "all of them" -- that is what
+# makes a single existing entry keep behaving exactly as before, and it is why
+# migrating one room at a time is possible: a second entry claims just that
+# room's satellite id while the first keeps everything else.
+CONF_SATELLITES = "satellites"
 
 DEFAULT_ADDON_URL = "http://localhost:8099"
 

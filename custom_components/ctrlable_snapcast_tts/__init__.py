@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .api import AddonApiClient
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN, PLATFORMS
+from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, CONF_SATELLITES, DOMAIN, PLATFORMS
 from .services import (
     ANNOUNCE_SCHEMA,
     CHIME_SCHEMA,
@@ -31,8 +31,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_BEARER_TOKEN],
     )
 
+    # Which satellites this entry answers for. Empty means "all of them", so an
+    # existing single-entry install keeps behaving exactly as it did.
+    satellites = tuple(
+        s.strip() for s in entry.data.get(CONF_SATELLITES, "").split(",") if s.strip()
+    )
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client,
+        "satellites": satellites,
     }
 
     hass.services.async_register(

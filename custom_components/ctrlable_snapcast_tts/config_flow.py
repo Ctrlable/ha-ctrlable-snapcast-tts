@@ -9,7 +9,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .api import AddonApiClient, CannotConnectError, InvalidAuthError
-from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, DOMAIN
+from .const import CONF_ADDON_URL, CONF_BEARER_TOKEN, CONF_SATELLITES, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,8 +30,17 @@ class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[
     async def async_step_user(
         self, user_input: dict | None = None
     ) -> FlowResult:
-        if self._async_current_entries():
-            return self.async_abort(reason="already_configured")
+        # No single-instance guard. A second entry is how one room migrates to a
+        # different streamer while the rest stay put: the new entry names just
+        # that satellite, the original keeps an empty list and answers for
+        # everything else. Duplicate URLs are still refused below, since two
+        # entries pointing at the same streamer is a mistake rather than a
+        # migration.
+        for existing in self._async_current_entries():
+            if user_input and existing.data.get(CONF_ADDON_URL) == user_input.get(
+                CONF_ADDON_URL
+            ):
+                return self.async_abort(reason="already_configured")
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -48,8 +57,15 @@ class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[
                 _LOGGER.exception("Unexpected error during config flow")
                 errors["base"] = "unknown"
             else:
+                sats = user_input.get(CONF_SATELLITES, "").strip()
                 return self.async_create_entry(
-                    title="Ctrlable Snapcast TTS",
+                    # Two entries look identical in the UI otherwise, and picking
+                    # the wrong one to edit is how a migration gets undone.
+                    title=(
+                        f"Ctrlable Snapcast TTS ({sats})"
+                        if sats
+                        else f"Ctrlable Snapcast TTS ({user_input[CONF_ADDON_URL]})"
+                    ),
                     data=user_input,
                 )
 
@@ -57,6 +73,9 @@ class CtrlableSnapcastTtsConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[
             {
                 vol.Required(CONF_ADDON_URL, default=_default_addon_url(self.hass)): str,
                 vol.Required(CONF_BEARER_TOKEN): str,
+                # Comma-separated satellite ids this streamer serves. LEAVE EMPTY
+                # for "all satellites" -- that is the normal single-streamer case.
+                vol.Optional(CONF_SATELLITES, default=""): str,
             }
         )
         return self.async_show_form(
@@ -109,6 +128,10 @@ class CtrlableSnapcastTtsOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_BEARER_TOKEN,
                     default=self._config_entry.data.get(CONF_BEARER_TOKEN, ""),
+                ): str,
+                vol.Optional(
+                    CONF_SATELLITES,
+                    default=self._config_entry.data.get(CONF_SATELLITES, ""),
                 ): str,
             }
         )
