@@ -5,7 +5,7 @@ import logging
 from functools import partial
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_STATE_CHANGED
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -138,11 +138,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _schedule_push()
                 return
 
+    @callback
+    def _state_changed(event) -> None:
+        old = event.data.get("old_state")
+        new = event.data.get("new_state")
+        if roster.state_event_affects_roster(
+            event.data.get("entity_id", ""),
+            old.state if old else None,
+            new.state if new else None,
+        ):
+            _schedule_push()
+
     entry.async_on_unload(
         hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _entity_registry_changed)
     )
     entry.async_on_unload(
         hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, _device_registry_changed)
+    )
+    # Availability only -- see state_event_affects_roster for why this is not a
+    # listener on every state change.
+    entry.async_on_unload(
+        hass.bus.async_listen(EVENT_STATE_CHANGED, _state_changed)
     )
 
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

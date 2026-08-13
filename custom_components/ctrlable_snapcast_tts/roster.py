@@ -60,6 +60,39 @@ def entity_event_affects_roster(action: str, entity_id: str, changes) -> bool:
     return bool(set(changes or {}) & _ENTITY_FIELDS)
 
 
+def _availability(state: str | None) -> str:
+    """Collapse a state to the only distinction the roster reports."""
+    if state is None or state == "unavailable":
+        return "offline"
+    if state == "unknown":
+        return "unknown"
+    return "online"
+
+
+def state_event_affects_roster(entity_id: str, old_state: str | None,
+                               new_state: str | None) -> bool:
+    """True when a state change alters something the roster actually reports.
+
+    Two different rules, because the two entity kinds carry different things:
+
+    - `assist_satellite.*` -- ONLY the availability flip. These cycle through
+      idle, listening, processing and responding constantly while in use, and a
+      full roster POST per transition would be a request storm carrying no new
+      information, since the roster reports online/offline and not activity.
+    - `select.*wake_word*` -- ANY value change, because the roster carries the
+      value itself. Changing a satellite's wake word in Home Assistant has to
+      reach the panel, and it never touches the satellite entity.
+
+    `_sensitivity` is excluded: same substring, but the roster does not report it.
+    """
+    eid = str(entity_id or "")
+    if eid.startswith(_PREFIX):
+        return _availability(old_state) != _availability(new_state)
+    if eid.startswith("select.") and "wake_word" in eid and "sensitivity" not in eid:
+        return old_state != new_state
+    return False
+
+
 def device_event_affects_roster(action: str, changes) -> bool:
     """True when a device-registry event could change a satellite's name or area.
 
@@ -76,6 +109,47 @@ def device_event_affects_roster(action: str, changes) -> bool:
 def _slug_to_id(slug: str) -> str:
     """HA slugs use underscores; ESPHome node names use hyphens."""
     return slug.replace("_", "-").strip("-")
+
+
+_NO_WAKE_WORD = "no_wake_word"
+_DEAD_STATES = ("", "unknown", "unavailable")
+
+
+def _wake_words(hass: HomeAssistant, ent_reg, device_id: str | None):
+    """Wake words configured on a satellite, and where they are detected.
+
+    ESPHome does not put this on the assist_satellite entity -- it exposes one
+    `select.<node>_wake_word` per slot on the SAME DEVICE, plus
+    `_wake_word_engine_location` ("On device" vs a server). So the only way to
+    report it is to walk the device's other entities.
+
+    An unused slot reads `no_wake_word`, which is a sentinel and not a wake word;
+    listing it would suggest a satellite responds to something called
+    "no_wake_word". `_sensitivity` is excluded -- it matches the same substring
+    but is a threshold, not a word.
+    """
+    words: list[str] = []
+    engine = ""
+    if not device_id:
+        return words, engine
+
+    # Sorted so slot 1 precedes slot 2, which is the order they are configured
+    # in and the order ESPHome evaluates them.
+    for ent in sorted(ent_reg.entities.values(), key=lambda x: x.entity_id):
+        if ent.device_id != device_id or not ent.entity_id.startswith("select."):
+            continue
+        eid = ent.entity_id
+        if "wake_word" not in eid or "sensitivity" in eid:
+            continue
+        state = hass.states.get(eid)
+        val = state.state if state else ""
+        if val in _DEAD_STATES:
+            continue
+        if "engine_location" in eid:
+            engine = val
+        elif val != _NO_WAKE_WORD and val not in words:
+            words.append(val)
+    return words, engine
 
 
 def collect(hass: HomeAssistant) -> list[dict]:
@@ -97,12 +171,17 @@ def collect(hass: HomeAssistant) -> list[dict]:
             area_entry = area_reg.async_get_area(area_id)
             area = area_entry.name if area_entry else ""
 
-        name = (
-            entry.name
-            or entry.original_name
-            or (device.name_by_user or device.name if device else "")
-            or entry.entity_id
-        )
+        # THE DEVICE NAME BEATS original_name, and the order matters more than it
+        # looks. ESPHome assist_satellite entities set has_entity_name, so their
+        # original_name is the PLATFORM's generic label -- literally "Assist
+        # satellite" for every one of them. Preferring it produced a roster of
+        # nine identically-named rows, which is useless for picking a satellite.
+        #
+        # HA itself displays these as "<device name> <entity name>", so the device
+        # name is the part that identifies the thing. entry.name still wins when
+        # set, because that is an explicit rename by the user.
+        dev_name = (device.name_by_user or device.name) if device else ""
+        name = entry.name or dev_name or entry.original_name or entry.entity_id
 
         # Candidates, best guess first.
         #
@@ -127,10 +206,35 @@ def collect(hass: HomeAssistant) -> list[dict]:
         seen: set[str] = set()
         candidates = [c for c in candidates if c and not (c in seen or seen.add(c))]
 
+        # ONLINE/OFFLINE. Only Home Assistant knows this -- the streamer sees a
+        # satellite exactly once, when it announces, which says nothing about
+        # whether it is reachable now. A satellite that has dropped off wifi looks
+        # identical to a working one in every other view, right up until an
+        # announcement silently goes nowhere.
+        #
+        # `disabled` and `unavailable` are deliberately distinct: disabled means
+        # somebody turned it off in HA, unavailable means it should be here and
+        # is not. Only the second is a fault worth flagging.
+        st_obj = hass.states.get(entry.entity_id)
+        if entry.disabled_by is not None:
+            status = "disabled"
+        elif st_obj is None or st_obj.state == "unavailable":
+            status = "offline"
+        elif st_obj.state == "unknown":
+            status = "unknown"
+        else:
+            status = "online"
+
+        wake_words, wake_engine = _wake_words(hass, ent_reg, entry.device_id)
+
         out.append({
             "entity_id": entry.entity_id,
             "name": name,
             "area": area,
+            "status": status,
+            "state": st_obj.state if st_obj else "",
+            "wake_words": wake_words,
+            "wake_word_engine": wake_engine,
             "candidates": candidates,
             # Best guess, for callers that want a single value. Explicitly a
             # guess: the mapping page should prefer an observed id when one

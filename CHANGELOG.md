@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.53] — 2026-08-12
+
+### Added
+- **Satellites now report online/offline.** Only Home Assistant can know this —
+  the streamer sees a satellite exactly once, when it announces, which says
+  nothing about whether it is reachable now. A satellite that has dropped off
+  wifi was indistinguishable from a working one until an announcement silently
+  went nowhere.
+
+  `disabled in HA` is reported separately from `offline`: the first is somebody
+  turning it off deliberately, the second is a fault.
+
+- **Wake words are listed per satellite**, with the detection engine location
+  ("On device" or a server). ESPHome puts neither on the `assist_satellite`
+  entity — each slot is a `select.<node>_wake_word` on the same device — so the
+  roster walks the device's other entities to find them. Unused slots read
+  `no_wake_word` and are omitted rather than listed as a wake word by that name.
+
+  Changing a wake word in Home Assistant re-pushes the roster. A satellite with
+  no wake word set is flagged, because it cannot be woken at all.
+
+### Fixed
+- **Satellites were all named "Assist satellite".** ESPHome sets
+  `has_entity_name`, so `original_name` is the platform's generic label for every
+  one of them, and it was preferred over the device name. Nine identically-named
+  rows are useless for picking a satellite. The device name now wins; an explicit
+  entity rename still beats both.
+
 ## [0.1.52] — 2026-08-12
 
 ### Fixed
