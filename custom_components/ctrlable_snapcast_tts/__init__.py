@@ -7,7 +7,9 @@ from functools import partial
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_call_later
 
 from .api import AddonApiClient
 from . import roster
@@ -77,16 +79,70 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _push_roster)
         )
 
+    # Re-push when the roster's CONTENT changes, which is not the same thing as
+    # the roster's MEMBERSHIP changing.
+    #
+    # An earlier version listened only for create/remove, with a comment claiming
+    # only add/remove could change the roster. That was wrong: the roster carries
+    # `name` and `area`, and both change under action="update". So assigning a
+    # room to a satellite in HA updated nothing here until the next HA restart --
+    # the panel kept showing the old room, or none, and looked simply broken.
+    #
+    # Area is the more common case and the worse one, because it is usually set
+    # on the DEVICE, not the entity. That fires the DEVICE registry event only,
+    # so an entity-registry listener alone would never see the change that people
+    # actually make. Both registries are watched.
+    #
+    # Debounced: renaming a device can emit several events, and each push is a
+    # full roster POST. The delay is short enough to feel immediate.
+    push_timer: list = [None]
+
     @callback
-    def _registry_changed(event) -> None:
-        # Only entity ADD/REMOVE can change the roster; ignore state churn.
-        if event.data.get("action") in ("create", "remove") and str(
-            event.data.get("entity_id", "")
-        ).startswith("assist_satellite."):
+    def _schedule_push() -> None:
+        if push_timer[0] is not None:
+            push_timer[0]()
+            push_timer[0] = None
+
+        @callback
+        def _fire(_now) -> None:
+            push_timer[0] = None
             entry.async_create_background_task(hass, _push_roster(), "ctrlable_roster_push")
 
+        push_timer[0] = async_call_later(hass, 2, _fire)
+
+    entry.async_on_unload(lambda: push_timer[0] and push_timer[0]())
+
+    @callback
+    def _entity_registry_changed(event) -> None:
+        if roster.entity_event_affects_roster(
+            event.data.get("action"),
+            event.data.get("entity_id", ""),
+            event.data.get("changes"),
+        ):
+            _schedule_push()
+
+    @callback
+    def _device_registry_changed(event) -> None:
+        if not roster.device_event_affects_roster(
+            event.data.get("action"), event.data.get("changes")
+        ):
+            return
+        # Only if this device actually carries a satellite -- most devices do not,
+        # and a full roster POST per unrelated device rename is not free.
+        dev_id = event.data.get("device_id")
+        if not dev_id:
+            return
+        ent_reg = er.async_get(hass)
+        for ent in ent_reg.entities.values():
+            if ent.device_id == dev_id and ent.entity_id.startswith("assist_satellite."):
+                _schedule_push()
+                return
+
     entry.async_on_unload(
-        hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _registry_changed)
+        hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _entity_registry_changed)
+    )
+    entry.async_on_unload(
+        hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, _device_registry_changed)
     )
 
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

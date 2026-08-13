@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.52] — 2026-08-12
+
+### Fixed
+- **Assigning a room to a satellite in Home Assistant now reaches the manager.**
+  It previously did not, until the next Home Assistant restart — the panel kept
+  showing the old room, or none, which looks broken rather than stale.
+
+  Two separate causes, both in 0.1.51:
+
+  - The registry listener fired only on `create` and `remove`, with a comment
+    asserting that only add/remove could change the roster. That was wrong: the
+    roster carries `name` and `area`, and both change under `action="update"`.
+  - A room is normally assigned to the **device**, not the entity, which emits a
+    *device* registry event. Only the entity registry was being watched, so the
+    path people actually use was never observed at all.
+
+  Both registries are now watched, filtered to the fields the roster actually
+  sends, and debounced by 2 seconds so a rename that emits several events costs
+  one push. A device event only triggers a push if that device owns an
+  `assist_satellite` entity.
+
+  The predicates deciding this live in `roster.py` beside `collect()`, because
+  they have to agree with what `collect()` sends — and a test asserts they cover
+  every field it reads. They drifted apart once already, and the resulting
+  failure was silent.
+
 ## [0.1.51] — 2026-08-12
 
 ### Added

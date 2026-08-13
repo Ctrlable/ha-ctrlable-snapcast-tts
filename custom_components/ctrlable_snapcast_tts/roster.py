@@ -36,6 +36,42 @@ _LOGGER = logging.getLogger(__name__)
 
 _PREFIX = "assist_satellite."
 
+# WHICH REGISTRY CHANGES CHANGE THE ROSTER.
+#
+# These predicates live here, beside collect(), rather than inline in the event
+# listeners, for one reason: they must agree with what collect() actually SENDS.
+# When they drifted apart the failure was silent and long-lived -- the listener
+# fired only on create/remove, so assigning a room updated nothing until the next
+# HA restart, and the panel just showed a stale room forever.
+#
+# If a field is added to the dict collect() builds, add it here too.
+_ENTITY_FIELDS = frozenset({"area_id", "name", "original_name", "device_id", "entity_id"})
+_DEVICE_FIELDS = frozenset({"area_id", "name", "name_by_user", "configuration_url"})
+
+
+def entity_event_affects_roster(action: str, entity_id: str, changes) -> bool:
+    """True when an entity-registry event changes what collect() would return."""
+    if not str(entity_id or "").startswith(_PREFIX):
+        return False
+    if action in ("create", "remove"):
+        return True
+    if action != "update":
+        return False
+    return bool(set(changes or {}) & _ENTITY_FIELDS)
+
+
+def device_event_affects_roster(action: str, changes) -> bool:
+    """True when a device-registry event could change a satellite's name or area.
+
+    Area is normally set on the DEVICE, not the entity, so this is the path the
+    common case actually takes. The caller still has to confirm the device owns
+    an assist_satellite entity -- that needs the registry, which is not this
+    module's business.
+    """
+    if action != "update":
+        return False
+    return bool(set(changes or {}) & _DEVICE_FIELDS)
+
 
 def _slug_to_id(slug: str) -> str:
     """HA slugs use underscores; ESPHome node names use hyphens."""
