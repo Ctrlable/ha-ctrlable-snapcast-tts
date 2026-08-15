@@ -47,6 +47,9 @@ substitutions:
   # which is how every commercial assistant behaves. If chime artefacts start
   # showing up at the start of transcriptions, raise this to ~700ms and the
   # chime will finish before the mic opens again.
+  # Collapse per-model duplicate wake detections into one, so two wake words can
+  # coexist on this device. Milliseconds, compared against millis().
+  wake_debounce_ms: '1200'
   chime_lead_in: 250ms
 
   # Blank the screen after this long at rest. Touch or a wake word brings it
@@ -239,6 +242,12 @@ globals:
     type: std::string
     restore_value: no
     initial_value: '""'
+  # millis() of the last ACCEPTED wake word, for the duplicate-detection guard.
+  # Not restored: after a reboot the only correct answer is "no recent wake".
+  - id: last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: current_wake_word
     type: std::string
     restore_value: no
@@ -544,48 +553,65 @@ micro_wake_word:
       internal: true
   vad:
   on_wake_word_detected:
-    # --- Ctrlable Snapcast routing ---
-    # Remember which model fired: the add-on can map wake-word -> target zone,
-    # so an announce with an empty wake_word only matches a "*" mapping.
-    - lambda: id(current_wake_word) = wake_word;
-
-    # React on screen FIRST, before anything that can block. The face changing
-    # is the fastest feedback available -- it beats the chime to the room by
-    # about a second.
-    - lambda: id(voice_assistant_phase) = ${voice_assist_awake_phase_id};
-    - script.execute: draw_display
-
-    # --- Ctrlable Snapcast routing ---
-    # The chime goes to the room, not to this box, and nothing is played locally
-    # at all any more.
+    # DEBOUNCE -- see the identical guard in respeaker-xvf3800-va.yaml.
+    # on_wake_word_detected is a PER-MODEL trigger: micro_wake_word scores every
+    # enabled model on every frame and the inference task queues one
+    # DetectionEvent per model that crosses its cutoff. The main loop drains the
+    # whole queue in a single pass and fires this trigger for EACH event, so two
+    # acoustically-close wake words make everything below run twice -- two chimes
+    # and two voice_assistant.start calls. Confirmed on the XVF3800 2026-08-14.
     #
-    # Playing it locally (silently, for its timing) is what produced the mute
-    # face on every wake word: an announcement starting while voice_assistant is
-    # not yet running is indistinguishable, to on_announcement, from the user
-    # starting media playback -- so it drew the muted page, then the idle page
-    # when the silent clip ended, and only then the listening page. Removing the
-    # local playback removes all three frames; the gap is now an explicit delay.
-    - homeassistant.service:
-        service: ctrlable_snapcast_tts.chime
-        data:
-          satellite_id: !lambda return App.get_name();
-          wake_word: !lambda return id(current_wake_word);
-          chime: wake
-          volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
+    # This config lists both hey_maya and okay_maya (commit 31f94c1), so it has
+    # always been one HA toggle away from the same fault; it simply never had two
+    # similar words ACTIVE. `stop_after_detection: true` does not help -- both
+    # events are queued before the drain starts and stop() does not break the loop.
+    - if:
+        condition:
+          lambda: 'return (millis() - id(last_wake_ms)) > ${wake_debounce_ms};'
+        then:
+          - lambda: id(last_wake_ms) = millis();
+          # --- Ctrlable Snapcast routing ---
+          # Remember which model fired: the add-on can map wake-word -> target zone,
+          # so an announce with an empty wake_word only matches a "*" mapping.
+          - lambda: id(current_wake_word) = wake_word;
 
-    # Nothing of ours is playing, but a previous reply might still be draining.
-    - wait_until:
-        - and:
-            - not:
-                media_player.is_announcing:
-            - not:
-                speaker.is_playing: null_speaker
+          # React on screen FIRST, before anything that can block. The face changing
+          # is the fastest feedback available -- it beats the chime to the room by
+          # about a second.
+          - lambda: id(voice_assistant_phase) = ${voice_assist_awake_phase_id};
+          - script.execute: draw_display
 
-    # Hold the mic closed until the room's chime has come and gone.
-    - delay: ${chime_lead_in}
+          # --- Ctrlable Snapcast routing ---
+          # The chime goes to the room, not to this box, and nothing is played locally
+          # at all any more.
+          #
+          # Playing it locally (silently, for its timing) is what produced the mute
+          # face on every wake word: an announcement starting while voice_assistant is
+          # not yet running is indistinguishable, to on_announcement, from the user
+          # starting media playback -- so it drew the muted page, then the idle page
+          # when the silent clip ended, and only then the listening page. Removing the
+          # local playback removes all three frames; the gap is now an explicit delay.
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.chime
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
+                chime: wake
+                volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
 
-    - voice_assistant.start:
-        wake_word: !lambda return wake_word;
+          # Nothing of ours is playing, but a previous reply might still be draining.
+          - wait_until:
+              - and:
+                  - not:
+                      media_player.is_announcing:
+                  - not:
+                      speaker.is_playing: null_speaker
+
+          # Hold the mic closed until the room's chime has come and gone.
+          - delay: ${chime_lead_in}
+
+          - voice_assistant.start:
+              wake_word: !lambda return wake_word;
 
 voice_assistant:
   id: va
