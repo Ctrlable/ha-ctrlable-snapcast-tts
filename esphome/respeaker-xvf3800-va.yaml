@@ -58,6 +58,10 @@ substitutions:
   # Backstop only, for when HA is unreachable or the shared sensor does not
   # exist yet (older integration build). Never the normal path.
   announce_max_wait: 25s
+  # Collapse per-model duplicate wake detections into one. See the long comment
+  # on on_wake_word_detected -- without this, two acoustically-close wake words
+  # cannot coexist on one device. Milliseconds, compared against millis().
+  wake_debounce_ms: '1200'
   # Mic opens this long after the wake word. The chime is audible in the room
   # ~0.45s after the service call, so at 250ms the mic opens first and the chime
   # lands during listening -- matching the other two satellites.
@@ -227,6 +231,16 @@ globals:
     type: std::string
     restore_value: no
     initial_value: '""'
+  # millis() of the last ACCEPTED wake word, for the duplicate-detection guard.
+  # Deliberately not restored -- after a reboot the only correct answer is "no
+  # recent wake". Starting at 0 does mean a wake word arriving in the first
+  # ${wake_debounce_ms} of uptime would be swallowed, which cannot happen here:
+  # micro_wake_word.start runs from voice_assistant's on_client_connected, i.e.
+  # only once HA has connected, many seconds after boot.
+  - id: last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: user_led_ring_color_r
     type: float
     restore_value: yes
@@ -1610,11 +1624,40 @@ micro_wake_word:
   vad:
     probability_cutoff: 0.05
   on_wake_word_detected:
-    # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
+    # DEBOUNCE -- this is what makes TWO wake words usable on one device.
+    #
+    # on_wake_word_detected is a PER-MODEL trigger. micro_wake_word scores every
+    # enabled model on every frame, and the inference task queues a DetectionEvent
+    # for EACH model that crosses its cutoff. The main loop then drains that queue
+    # in a single pass:
+    #
+    #   while (xQueueReceive(this->detection_queue_, &detection_event, 0)) {
+    #     this->wake_word_detected_trigger_.trigger(*detection_event.wake_word);
+    #     if (this->stop_after_detection_) { this->stop(); }   // only sets state_
+    #   }
+    #
+    # "Hey Maya" and "Okay Maya" differ by one syllable, so one utterance satisfies
+    # both and this block ran TWICE: two chime service calls (audible as two chimes,
+    # observed 2026-08-14) and two voice_assistant.start calls, the second of which
+    # HA rejects as `duplicate_wake_up_detected` -- an error code this config
+    # already swallows further down, which is the tell that duplicates were always
+    # reaching HA.
+    #
+    # `stop_after_detection: true` does NOT fix it: both events are queued before
+    # the drain begins, and stop() does not break the while loop, so the second
+    # still fires. The guard has to be here, on our own actions.
+    #
+    # Window is generous because the duplicate lands within milliseconds, while a
+    # legitimate re-wake is always separated by at least a chime plus a spoken
+    # command. uint32 subtraction is rollover-safe, so millis() wrapping at ~49
+    # days needs no special case.
     - if:
         condition:
-          switch.is_off: mic_mute_switch
+          and:
+            - switch.is_off: mic_mute_switch
+            - lambda: 'return (millis() - id(last_wake_ms)) > ${wake_debounce_ms};'
         then:
+          - lambda: id(last_wake_ms) = millis();
           - script.execute:
               id: send_wake_word_event
               wake_word: !lambda return wake_word;
