@@ -269,18 +269,18 @@ micro_wake_word:
   microphone: i2s_mic
   stop_after_detection: false
   models:
-    # OUR OWN MODEL, loaded from disk (esphome/models/) rather than a URL.
+    # OUR OWN MODEL, served from this repo's raw URL (esphome/models/ in git).
     # Trained 2026-08-10 in ~/Projects/ctrlable-wakewords; ~96% recall, cutoff
     # 0.94 measured rather than guessed. Replaces okay_nabu -- micro_wake_word
     # runs every model on every frame, so this keeps the CPU cost flat. Restore
     # the ${okay_nabu_model_file} line to get it back.
-    - model: models/hey_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/hey_maya.json
       id: hey_maya
     # Trained 2026-08-11 at 30000 samples: 4.8% miss at ZERO false accepts/hour
     # on the quantized streaming model. The 2000-sample first attempt missed 11%
     # and was never shipped. Cutoff 0.98 rather than hey_maya's 0.94 because
     # "okay" is a far commoner word in speech than "hey".
-    - model: models/okay_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/okay_maya.json
       id: okay_maya
     - model: hey_jarvis
       id: hey_jarvis

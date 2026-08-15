@@ -57,10 +57,11 @@ substitutions:
   #
   # "Hey Maya" and "Okay Maya" are OURS -- trained in ~/Projects/ctrlable-wakewords
   # because no published "maya" model exists (the upstream set is okay_nabu,
-  # hey_jarvis, hey_mycroft, alexa, plus a few experiments). They are the only
-  # models here loaded from disk instead of a URL; the .json/.tflite pairs live
-  # in esphome/models/ and must be present in the ESPHome config directory at
-  # build time.
+  # hey_jarvis, hey_mycroft, alexa, plus a few experiments). They are served from this repo's raw URLs
+  # rather than from disk, so the YAML flashes from any machine without needing
+  # the models/ folder copied alongside it. The .json references its .tflite by
+  # bare filename and ESPHome resolves that against the same URL path, so both
+  # come down together.
   #
   # There are ALSO openWakeWord builds of both words (hey_maya_oww,
   # okay_maya_oww) running on the LVA zones. Those are a different architecture
@@ -509,15 +510,15 @@ micro_wake_word:
   microphone: i2s_mic
   stop_after_detection: false
   models:
-    # OUR OWN MODEL, and the only one here loaded from disk rather than a URL --
-    # see esphome/models/. Trained 2026-08-10 in ~/Projects/ctrlable-wakewords;
+    # OUR OWN MODEL, served from this repo's raw URL (esphome/models/ in git).
+    # Trained 2026-08-10 in ~/Projects/ctrlable-wakewords;
     # ~96% recall, cutoff 0.94 measured rather than guessed.
     #
     # It REPLACES okay_nabu rather than joining it. micro_wake_word runs every
     # model on every frame, so the list is a CPU budget and not just flash; this
     # keeps the count flat. To get okay_nabu back, restore the ${okay_nabu_model_file}
     # line -- the substitution is still defined.
-    - model: models/hey_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/hey_maya.json
       id: hey_maya
     # Trained 2026-08-11 at 30000 samples. The 2000-sample first attempt missed
     # 11% of utterances and was never shipped; this one measures 4.8% miss at
@@ -526,7 +527,7 @@ micro_wake_word:
     #
     # Cutoff 0.98 rather than hey_maya's 0.94: "okay" is a far commoner word in
     # ordinary speech than "hey", so it earns a stricter threshold.
-    - model: models/okay_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/okay_maya.json
       id: okay_maya
     - model: hey_jarvis
       id: hey_jarvis
