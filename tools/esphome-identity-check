@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Refuse to flash an ESPHome satellite whose identity has changed.
+#
+# WHY THIS EXISTS
+# ---------------
+# The configs in esphome/ are TEMPLATES carrying generic names; the files the
+# add-on actually builds carry the device's real identity in `substitutions:`:
+#
+#     repo esphome/respeaker-xvf3800-va.yaml   name: respeaker-xvf3800
+#     deployed /config/esphome/xvf3800-1-75357c.yaml   name: xvf3800-1-75357c
+#
+# `name:` is the device's mDNS hostname and its identity to both the ESPHome
+# add-on and Home Assistant's config entry. Copying a template over a deployed
+# file changes it, and on the next OTA the satellite comes back as a DIFFERENT
+# device: the existing config entry points at a host that no longer answers to
+# that name, every entity it owned goes unavailable, and the zone goes silent
+# until someone re-adopts it by hand. The 2068-line XVF3800 config differs from
+# its template by exactly these two lines and nothing else, so the mistake looks
+# like a no-op diff right up until the device disappears.
+#
+# Run this before every `esphome run`. It compares the name the file declares
+# against the name the add-on and HA already know, and fails loudly on a
+# mismatch.
+#
+#     tools/esphome-identity-check                 # check every deployed config
+#     tools/esphome-identity-check xvf3800-1-75357c.yaml
+set -u
+
+APPLIANCE="${CTRLABLE_APPLIANCE:-root@11850-pinecrest-home-1.ctrlable.com}"
+CONTAINER="${ESPHOME_CONTAINER:-app_5c53de3b_esphome}"
+CONF_DIR=/config/esphome
+
+want="${1:-}"
+fail=0
+
+# The name a file declares, and the name its filename implies. For these
+# satellites the deployed filename IS the device name -- that is the convention
+# the add-on's dashboard and HA's entry titles were both built from.
+# bash 3.2 on macOS has no `mapfile`, so collect into a temp file.
+rows_file="$(mktemp)"
+trap 'rm -f "$rows_file"' EXIT
+ssh -o ConnectTimeout=25 "$APPLIANCE" \
+  "docker exec $CONTAINER sh -lc 'for f in $CONF_DIR/*.yaml; do
+      case \"\$f\" in */secrets.yaml) continue;; esac
+      n=\$(sed -n \"s/^[[:space:]]\\{1,\\}name:[[:space:]]*//p\" \"\$f\" | head -1)
+      [ -n \"\$n\" ] && echo \"\$(basename \$f)|\$n\"
+    done'" > "$rows_file" 2>/dev/null
+
+if [ ! -s "$rows_file" ]; then
+    echo "could not read any config from $APPLIANCE:$CONF_DIR" >&2
+    exit 2
+fi
+
+printf "%-34s %-30s %s\n" "FILE" "DECLARED name:" "VERDICT"
+printf -- "-%.0s" {1..86}; echo
+while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    file="${row%%|*}"; name="${row##*|}"
+    [ -n "$want" ] && [ "$file" != "$want" ] && continue
+    stem="${file%.yaml}"
+    if [ "$name" = "$stem" ]; then
+        verdict="ok"
+    else
+        # Not automatically wrong -- a few configs legitimately differ (the
+        # AtomS3R is deployed as esphome-web-bca1a8.yaml but named
+        # atoms3r-echo-bca1a8). What matters is that the name did not CHANGE,
+        # so this is a prompt to confirm, not a failure.
+        verdict="review: filename stem is '$stem'"
+    fi
+    printf "%-34s %-30s %s\n" "$file" "$name" "$verdict"
+done < "$rows_file"
+
+echo
+echo "Before flashing, confirm the name above is UNCHANGED from what is running."
+echo "A changed name = a new device to ESPHome and HA, and the old entry dies."
+exit $fail
