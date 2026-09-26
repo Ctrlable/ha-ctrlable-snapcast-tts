@@ -1673,7 +1673,16 @@ micro_wake_word:
                     condition:
                       voice_assistant.is_running:
                     then:
-                      voice_assistant.stop:
+                      - voice_assistant.stop:
+                      # --- Ctrlable Snapcast routing ---
+                      # The exchange is being abandoned, and anything audible
+                      # from it is in the room, not here. Idempotent, so it
+                      # costs nothing when there was no sound to stop.
+                      - homeassistant.service:
+                          service: ctrlable_snapcast_tts.stop
+                          data:
+                            satellite_id: !lambda return App.get_name();
+                            wake_word: !lambda return id(current_wake_word);
                     # Stop any other media player announcement
                     else:
                       - if:
@@ -1684,6 +1693,18 @@ micro_wake_word:
                             - media_player.stop:
                                 announcement: true
                                 id: external_media_player
+                            # --- Ctrlable Snapcast routing ---
+                            # THIS is the barge-in. media_player.stop above only
+                            # silences the local copy, which on a Snapcast-routed
+                            # satellite plays at volume 0 and nobody hears -- so
+                            # until this call existed, detecting the stop word
+                            # changed nothing audible. The reply is an ffmpeg
+                            # process in the streamer; this is what reaches it.
+                            - homeassistant.service:
+                                service: ctrlable_snapcast_tts.stop
+                                data:
+                                  satellite_id: !lambda return App.get_name();
+                                  wake_word: !lambda return id(current_wake_word);
                           # Start the voice assistant and play the wake sound, if enabled
                           else:
                             # --- Ctrlable Snapcast routing ---
