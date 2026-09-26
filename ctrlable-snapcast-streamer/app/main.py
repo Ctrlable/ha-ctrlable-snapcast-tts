@@ -47,6 +47,7 @@ from streamer import (
     _CHIME_SILENCE_PADDING_MS,
     hold_group,
     release_group,
+    stop as stop_announcement,
     ClientNotEnabledError,
     ClientNotFoundError,
     NotProvisionedError,
@@ -606,6 +607,39 @@ async def api_release(body: ReleaseBody) -> dict:
             if await release_group(cid):
                 released.append(cid)
     return {"released": released}
+
+
+@app.post("/stop/by_satellite", dependencies=[Depends(require_auth)])
+async def api_stop(body: ReleaseBody) -> dict:
+    """Cut off the reply this satellite is currently playing -- barge-in.
+
+    The satellite detects the stop word; the audio it needs to stop is here.
+    Its own media_player.stop only silences a local copy that, on a
+    Snapcast-routed device, nobody was ever listening to.
+
+    Idempotent and cheap, exactly like release: stopping a zone that is not
+    playing returns an empty list rather than an error, so a device may fire
+    this on any stop-word detection without first checking whether it matters.
+    A stop word landing a moment after the answer ended is the normal case.
+
+    The group is released too. Reaching this point means the exchange is over
+    by the user's decision, and a zone left held would keep the room's music
+    ducked with nothing speaking over it.
+    """
+    state = get_state()
+    try:
+        target_ids = _resolve_mapping(state.mappings, body.satellite_id, body.wake_word)
+    except (SatelliteNotMappedError, NoMatchingMappingError):
+        _note_unmapped(body.satellite_id)
+        return {"stopped": []}
+    stopped = []
+    for cid in target_ids:
+        with contextlib.suppress(Exception):
+            if await stop_announcement(cid):
+                stopped.append(cid)
+        with contextlib.suppress(Exception):
+            await release_group(cid)
+    return {"stopped": stopped}
 
 
 # ── Mappings API ──────────────────────────────────────────────────

@@ -117,6 +117,33 @@ release:
       selector:
         text:
 
+stop:
+  name: Stop
+  description: >-
+    Cut off the answer a satellite's zone is playing right now — barge-in. The
+    satellite detects the stop word, but the sound is not on the satellite: it
+    is being streamed into Snapcast by the add-on, and the device's own
+    media_player.stop only silences a local copy nobody hears. Safe to call on
+    every stop-word detection; stopping a zone that is not playing is a no-op.
+    The zone's hold is released too, so the room's music does not stay ducked.
+  fields:
+    satellite_id:
+      name: Satellite ID
+      description: The satellite whose zone should stop playing.
+      required: true
+      example: cores3-va-e39e44
+      selector:
+        text:
+    wake_word:
+      name: Wake word
+      description: >-
+        Which mapping to resolve, when a satellite routes to different zones
+        per wake word. Omit to use its "*" mapping.
+      required: false
+      example: hey_maya
+      selector:
+        text:
+
 set_mapping:
   name: Set Mapping
   description: Programmatically upsert a satellite → snapclient mapping row.

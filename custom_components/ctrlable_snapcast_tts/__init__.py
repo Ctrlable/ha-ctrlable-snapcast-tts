@@ -20,11 +20,13 @@ from .services import (
     HOLD_SCHEMA,
     RELEASE_SCHEMA,
     SET_MAPPING_SCHEMA,
+    STOP_SCHEMA,
     handle_announce,
     handle_chime,
     handle_hold,
     handle_release,
     handle_set_mapping,
+    handle_stop,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +60,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     hass.services.async_register(
         DOMAIN, "release", partial(handle_release, hass), schema=RELEASE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, "stop", partial(handle_stop, hass), schema=STOP_SCHEMA
     )
     hass.services.async_register(
         DOMAIN, "set_mapping", partial(handle_set_mapping, hass), schema=SET_MAPPING_SCHEMA
@@ -174,6 +179,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_remove(DOMAIN, "chime")
         hass.services.async_remove(DOMAIN, "hold")
         hass.services.async_remove(DOMAIN, "release")
+        hass.services.async_remove(DOMAIN, "stop")
         hass.services.async_remove(DOMAIN, "set_mapping")
     return True
 

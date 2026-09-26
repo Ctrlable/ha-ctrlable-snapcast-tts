@@ -79,6 +79,21 @@ def _lock(client_id: str) -> asyncio.Lock:
     return _locks[client_id]
 
 
+# The decoder currently feeding each client, so a reply in progress can be cut
+# off. Without this there is no way to interrupt an answer: the satellites can
+# detect a stop word perfectly well, but the audio they need to stop is not
+# theirs -- it is an ffmpeg process here, pushing PCM into Snapcast. Their local
+# media_player.stop only ever silenced a copy nobody was listening to.
+#
+# Killing the decoder is the whole mechanism, and it is deliberately the ONLY
+# thing stop() does. _stream_ffmpeg's read loop sees EOF, falls out, and its
+# existing finally closes the socket and reaps the process -- so announce()
+# returns normally, its caller reports a (short) duration, the ANNOUNCING signal
+# goes off, and every layer above unwinds through the path it already had. No
+# new teardown, no cancellation, nothing to get half-done.
+_inflight: dict[str, asyncio.subprocess.Process] = {}
+
+
 @dataclass
 class AnnounceResult:
     client_id: str
@@ -195,10 +210,14 @@ async def _stream_pcm(url: str, host: str, port: int) -> None:
             await sock_writer.wait_closed()
 
 
-async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None = None) -> int:
+async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None = None,
+                         client_id: str = "") -> int:
     """Decode URL via ffmpeg → s16le 48 kHz stereo → Snapcast TCP source.
 
     Returns the PCM byte count, which is what tells us how long the audio is.
+
+    `client_id` only registers the decoder in `_inflight` so stop() can reach
+    it; passing nothing keeps the old behaviour of an uninterruptible stream.
     """
     # stderr was DEVNULL, and that is how a decoder that never opened its input
     # looked exactly like a successful announcement: no bytes, no duration, no
@@ -213,6 +232,8 @@ async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None 
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    if client_id:
+        _inflight[client_id] = proc
     _, sock_writer = await asyncio.open_connection(host, port)
     written = 0
     try:
@@ -234,6 +255,10 @@ async def _stream_ffmpeg(url: str, host: str, port: int, silence_ms: int | None 
         with contextlib.suppress(Exception):
             proc.kill()
         await proc.wait()
+        # Only ever clear our own entry: a stop that raced a new announce would
+        # otherwise delete the decoder that just replaced this one.
+        if client_id and _inflight.get(client_id) is proc:
+            del _inflight[client_id]
 
     if written == 0:
         # Loud, because the whole class of bug this add-on keeps producing is
@@ -397,6 +422,38 @@ async def release_group(client_id: str) -> bool:
     return True
 
 
+async def stop(client_id: str) -> bool:
+    """Cut off the reply currently playing to this client. True if one was.
+
+    This is what makes barge-in audible. The satellites already detect a stop
+    word while a reply plays -- measured at 0.93-0.996 on the Linux satellites,
+    over their own TTS, with no echo cancellation -- but detection went nowhere,
+    because the sound is not on the device. It is here, and nothing could reach
+    it.
+
+    Returns False when nothing is playing, which is not an error: a stop word
+    landing in a gap, or a moment after the answer ended, is the normal case and
+    the caller should treat it as a no-op rather than something to report.
+
+    ONE THING TO EXPECT: Snapcast buffers for multi-room sync, so the room keeps
+    playing whatever is already in that buffer -- roughly up to a second of
+    trailing audio after the decoder dies. Killing the source is the right cut
+    point regardless; silencing the buffer too would mean reaching into the
+    client's stream and is not worth the blast radius for a tail this short.
+    """
+    proc = _inflight.get(client_id)
+    if proc is None:
+        return False
+    with contextlib.suppress(Exception):
+        proc.kill()
+    # Deliberately NOT awaiting proc.wait() or removing the registry entry: the
+    # streaming coroutine still owns this process and does both in its finally.
+    # Reaping it here would race that, and a second reaper on an already-reaped
+    # process is exactly the kind of thing that only fails under load.
+    _LOGGER.info("stopped in-flight announcement for %r", client_id)
+    return True
+
+
 async def announce(
     client_id: str, tts_url: str, source_host: str, volume: int | None = None,
     drain: float | None = None, silence_ms: int | None = None,
@@ -515,7 +572,8 @@ async def announce(
                 # We already decode to s16le 48kHz stereo, so the byte count IS
                 # the duration, exactly, with no second process and no
                 # dependency on what the server chose to advertise.
-                pcm = await _stream_ffmpeg(tts_url, host, cs.announce_port, silence_ms)
+                pcm = await _stream_ffmpeg(tts_url, host, cs.announce_port, silence_ms,
+                                           client_id=client_id)
                 audio_duration = pcm / float(48000 * 2 * 2)
             push = time.monotonic() - t0
 

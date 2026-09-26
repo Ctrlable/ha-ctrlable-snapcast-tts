@@ -59,6 +59,13 @@ RELEASE_SCHEMA = vol.Schema(
     }
 )
 
+STOP_SCHEMA = vol.Schema(
+    {
+        vol.Required("satellite_id"): cv.string,
+        vol.Optional("wake_word"): cv.string,
+    }
+)
+
 SET_MAPPING_SCHEMA = vol.Schema(
     {
         vol.Required("satellite_id"): cv.string,
@@ -272,6 +279,36 @@ async def handle_release(hass: HomeAssistant, call: ServiceCall) -> None:
         await client.release(satellite_id, call.data.get("wake_word"))
     except Exception as exc:  # noqa: BLE001 - never let this break an exchange
         _LOGGER.debug("ctrlable_snapcast_tts: release failed — %s", exc)
+
+
+async def handle_stop(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Barge-in: stop the answer this satellite's zone is playing right now.
+
+    The satellite detects the stop word; the sound is not on the satellite. It
+    is an ffmpeg process in the add-on pushing PCM into Snapcast, and until this
+    existed nothing could reach it -- the device's own media_player.stop
+    silenced a local copy that, on a Snapcast-routed satellite, nobody hears.
+
+    Fire-and-forget on the same reasoning as release: the add-on treats stopping
+    a zone that is not playing as a no-op, so a device may call this on every
+    stop-word detection without first deciding whether it matters. A stop word
+    landing just after the answer ended is the ordinary case, not a fault, so
+    failures are logged at debug and never break the exchange.
+    """
+    satellite_id: str = call.data["satellite_id"]
+    client = _get_client(hass, satellite_id)
+    if client is None:
+        return
+    try:
+        stopped = await client.stop(satellite_id, call.data.get("wake_word"))
+    except Exception as exc:  # noqa: BLE001 - never let this break an exchange
+        _LOGGER.debug("ctrlable_snapcast_tts: stop failed — %s", exc)
+        return
+    if stopped:
+        _LOGGER.debug(
+            "ctrlable_snapcast_tts: stopped announcement for %r on %s",
+            satellite_id, stopped,
+        )
 
 
 async def handle_set_mapping(hass: HomeAssistant, call: ServiceCall) -> None:
