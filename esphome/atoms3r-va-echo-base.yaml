@@ -306,9 +306,41 @@ micro_wake_word:
     # always been one HA toggle away from the same fault; it simply never had two
     # similar words ACTIVE. `stop_after_detection: true` does not help -- both
     # events are queued before the drain starts and stop() does not break the loop.
+    # --- Ctrlable barge-in ---
+    # A reply is playing, so the ONLY word that may act is the stop word.
+    #
+    # Anything else heard now is almost certainly this device hearing its own
+    # answer through the room speakers -- the self-trigger announce_and_wait used
+    # to avoid by shutting the engine off entirely. Acting on it would end the
+    # reply at random. So the engine keeps listening and we narrow what counts:
+    # "stop" ends the answer, every other word waits until it finishes.
     - if:
         condition:
-          lambda: 'return (millis() - id(last_wake_ms)) > ${wake_debounce_ms};'
+          and:
+            - lambda: return id(responding);
+            - lambda: 'return wake_word == "stop";'
+        then:
+          - logger.log: "barge-in: stop word during a reply"
+          # The sound is in the room, not on this device, so this is the call that
+          # actually silences it. media_player.stop only clears the local
+          # pipeline and the assist_satellite state.
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.stop
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
+          - media_player.stop:
+              announcement: true
+          - script.execute: finish_response
+
+    - if:
+        condition:
+          and:
+            - lambda: 'return (millis() - id(last_wake_ms)) > ${wake_debounce_ms};'
+            # Never start a new exchange while one is still answering. Previously
+            # implicit, because the engine was stopped for the duration; now that
+            # it keeps listening for "stop", it has to be said out loud.
+            - lambda: return !id(responding);
         then:
           - lambda: id(last_wake_ms) = millis();
           # --- Ctrlable Snapcast routing ---
@@ -519,9 +551,16 @@ script:
     mode: restart
     then:
       - lambda: id(responding) = true;
-      # Stop listening while the room is talking -- the answer plays through
-      # speakers near this mic and would otherwise re-trigger the wake word.
-      - script.execute: stop_wake_word
+      # The engine used to be stopped here -- "the answer plays through speakers
+      # near this mic and would otherwise re-trigger the wake word", which was
+      # true, and is why barge-in never worked on this device.
+      #
+      # It now stays listening with the stop model armed for the reply.
+      # on_wake_word_detected ignores every word except "stop" while `responding`
+      # is set, so a false wake can no longer truncate an answer, and "stop" can
+      # end one. The residual risk is an answer that itself contains the word --
+      # the same trade the Linux satellites make.
+      - micro_wake_word.enable_model: stop
       - homeassistant.service:
           service: ctrlable_snapcast_tts.announce
           data:
@@ -544,6 +583,9 @@ script:
   # The single place an exchange ends once an answer was routed to Snapcast.
   - id: finish_response
     then:
+      # Disarm the stop word with the exchange. Left armed it would be live
+      # during ordinary room noise, with no reply to cancel.
+      - micro_wake_word.disable_model: stop
       - lambda: |-
           id(responding) = false;
           id(last_tts_url) = "";
