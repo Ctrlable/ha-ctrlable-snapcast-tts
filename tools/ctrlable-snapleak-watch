@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Sample what the announcement snapserver is leaking, against a control.
+
+WHY THIS EXISTS
+---------------
+snapserver-announcement grew to 2652 MB over 15 days on LXC 113 while the plain
+snapserver beside it -- same binary, same version (v0.35.0), same host -- sat at
+14 MB. Restarting it dropped it to 14 MB, so it is a leak in the process and not
+a configuration choice.
+
+Three hypotheses were tested and are DEAD, so do not re-test them:
+
+  per-connection heap   200 connect/push/close cycles on an announcement source
+                        port moved RSS by 12 kB total. Connections do not leak.
+  socket accumulation   1 orphaned CLOSE_WAIT, no growth. 35 socket fds for 20
+                        listeners plus live clients is correct. Nothing to reap.
+  threads / mappings    3 threads and 163 map regions on BOTH instances, the
+                        control having run 15 days. Neither leaks.
+
+RssAnon == Private_Dirty == Anonymous on both, so the growth is plain heap. That
+is what this samples, next to the activity that might drive it.
+
+WHAT TO LOOK FOR
+----------------
+Plot rss_anon_kb against announce_events. If they rise together, the leak is per
+announcement and the fix is upstream (or a restart timer). If rss_anon_kb rises
+while announce_events is flat, something in the idle path is responsible and the
+restart timer is treating a symptom we have not understood.
+
+arenas matters too: malloc keeps per-thread arenas and glibc only returns memory
+at the top of a heap. If maps/arenas climb with rss_anon, it is fragmentation
+rather than a true leak, and malloc_trim would recover it where a restart is
+currently the only lever.
+
+The control column is the whole point. Anything that grows on BOTH instances is
+normal operation, not the bug.
+
+    ctrlable-snapleak-watch                 # one sample to stdout
+    ctrlable-snapleak-watch --loop 60       # append CSV forever, 60s apart
+    ctrlable-snapleak-watch --csv /var/log/ctrlable-snapleak.csv --loop 60
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+UNITS = {
+    "anno": "snapserver-announcement",
+    "ctrl": "snapserver",                 # the control: same binary, quiet workload
+}
+ANNO_RPC_PORT = 1715
+
+FIELDS = [
+    "ts", "unit", "uptime_s", "vmrss_kb", "rss_anon_kb", "rss_file_kb",
+    "vmdata_kb", "threads", "fds", "sock_fds", "maps", "arenas",
+    "streams", "clients", "active_streams", "announce_events",
+]
+
+
+def _pid_of(unit: str) -> int | None:
+    for base in (f"/sys/fs/cgroup/system.slice/{unit}.service/cgroup.procs",):
+        try:
+            first = Path(base).read_text().split()
+            if first:
+                return int(first[0])
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def _status(pid: int) -> dict[str, int]:
+    want = {"VmRSS", "RssAnon", "RssFile", "VmData", "Threads"}
+    out: dict[str, int] = {}
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            k, _, v = line.partition(":")
+            if k in want:
+                out[k] = int(v.split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def _fd_counts(pid: int) -> tuple[int, int]:
+    """Total fds, and how many are sockets. A leak of either is diagnostic."""
+    d = Path(f"/proc/{pid}/fd")
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return (0, 0)
+    socks = 0
+    for e in entries:
+        try:
+            if "socket" in os.readlink(e):
+                socks += 1
+        except OSError:
+            continue
+    return (len(entries), socks)
+
+
+def _maps_and_arenas(pid: int) -> tuple[int, int]:
+    """Region count, and how many look like malloc arenas.
+
+    glibc names nothing, so an arena is inferred: an anonymous rw region of a
+    round size. Approximate on purpose -- the TREND is what matters, not the
+    absolute count.
+    """
+    try:
+        lines = Path(f"/proc/{pid}/maps").read_text().splitlines()
+    except OSError:
+        return (0, 0)
+    arenas = 0
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) >= 5 and parts[1].startswith("rw") and len(parts) == 5:
+            arenas += 1                      # anonymous (no pathname) rw region
+    return (len(lines), arenas)
+
+
+def _uptime_s(unit: str) -> int:
+    """Seconds since the unit started.
+
+    From the WALL-CLOCK timestamp, not ActiveEnterTimestampMonotonic: inside a
+    container /proc/uptime is the host's, so subtracting a monotonic figure from
+    it produced nonsense -- 0 for a unit running an hour, 39h for one running 15
+    days. The leak is a rate, so getting this wrong would misprice it.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", unit],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        if not out:
+            return -1
+        # "Sun 2026-09-27 18:33:23 EDT" -> drop the weekday and the zone name,
+        # which %Z cannot parse back reliably; local time is what we want.
+        parts = out.split()
+        if len(parts) < 3:
+            return -1
+        stamp = time.strptime(f"{parts[1]} {parts[2]}", "%Y-%m-%d %H:%M:%S")
+        return max(0, int(time.time() - time.mktime(stamp)))
+    except Exception:                                        # noqa: BLE001
+        return -1
+
+
+def _rpc_status() -> tuple[int, int, int]:
+    """streams, clients, streams currently playing -- from the announcement RPC.
+
+    'active_streams' is the number NOT idle. If the leak tracks this rather than
+    the announcement count, the cost is in holding a stream open, not in serving
+    one.
+    """
+    try:
+        s = socket.create_connection(("127.0.0.1", ANNO_RPC_PORT), timeout=6)
+        s.sendall(json.dumps(
+            {"id": 1, "jsonrpc": "2.0", "method": "Server.GetStatus"}).encode() + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(262144)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        srv = json.loads(buf.split(b"\n")[0])["result"]["server"]
+        streams = srv.get("streams", [])
+        groups = srv.get("groups", [])
+        active = sum(1 for st in streams
+                     if (st.get("status") or st.get("uri", {}).get("query", {})
+                         .get("status")) not in (None, "idle"))
+        return (len(streams), sum(len(g.get("clients", [])) for g in groups), active)
+    except Exception:                                        # noqa: BLE001
+        return (-1, -1, -1)
+
+
+_EV = re.compile(r"(Stream|stream).*(active|playing|idle)|Chunk|connect", re.I)
+
+
+def _announce_events(since: str) -> int:
+    """How much announcement traffic happened since the last sample.
+
+    Counted from the unit's own journal rather than from the streamer, which
+    lives on a different host -- this has to work with only what LXC 113 knows.
+    """
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", f"{UNITS['anno']}.service", "--since", since,
+             "--no-pager", "-q"],
+            capture_output=True, text=True, timeout=20).stdout
+        return sum(1 for ln in out.splitlines() if _EV.search(ln))
+    except Exception:                                        # noqa: BLE001
+        return -1
+
+
+def sample(since: str) -> list[dict]:
+    rows = []
+    ev = _announce_events(since)
+    streams, clients, active = _rpc_status()
+    now = int(time.time())
+    for key, unit in UNITS.items():
+        pid = _pid_of(unit)
+        if pid is None:
+            continue
+        st = _status(pid)
+        fds, socks = _fd_counts(pid)
+        maps, arenas = _maps_and_arenas(pid)
+        rows.append({
+            "ts": now, "unit": key, "uptime_s": _uptime_s(unit),
+            "vmrss_kb": st.get("VmRSS", -1), "rss_anon_kb": st.get("RssAnon", -1),
+            "rss_file_kb": st.get("RssFile", -1), "vmdata_kb": st.get("VmData", -1),
+            "threads": st.get("Threads", -1), "fds": fds, "sock_fds": socks,
+            "maps": maps, "arenas": arenas,
+            # RPC and journal figures describe the announcement instance only;
+            # repeating them on the control row would invite a false comparison.
+            "streams": streams if key == "anno" else -1,
+            "clients": clients if key == "anno" else -1,
+            "active_streams": active if key == "anno" else -1,
+            "announce_events": ev if key == "anno" else -1,
+        })
+    return rows
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--csv", default="", help="append here instead of stdout")
+    ap.add_argument("--loop", type=int, default=0, metavar="SECONDS")
+    args = ap.parse_args()
+
+    out = None
+    if args.csv:
+        newfile = not Path(args.csv).exists()
+        out = open(args.csv, "a", buffering=1)
+        if newfile:
+            out.write(",".join(FIELDS) + "\n")
+
+    interval = max(args.loop, 0)
+    since = "-1min"
+    while True:
+        for row in sample(since):
+            line = ",".join(str(row[f]) for f in FIELDS)
+            (out or sys.stdout).write(line + "\n")
+        if not interval:
+            break
+        since = f"-{interval}s"
+        time.sleep(interval)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
