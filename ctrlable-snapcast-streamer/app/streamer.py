@@ -93,6 +93,24 @@ def _lock(client_id: str) -> asyncio.Lock:
 # new teardown, no cancellation, nothing to get half-done.
 _inflight: dict[str, asyncio.subprocess.Process] = {}
 
+# The stream to switch a client BACK to while an announcement is in flight.
+# _sticky only gets armed once an announcement finishes, so during the reply --
+# which is exactly when a barge-in happens -- it is often empty and there is
+# otherwise no record of where the group came from.
+_active_live: dict[str, str] = {}
+
+# Lets a barge-in cut announce()'s playback wait short. Without it the client
+# lock stays held for the remainder of a reply the user just cancelled, so the
+# next thing they say queues behind audio nobody is listening to.
+_stop_events: dict[str, asyncio.Event] = {}
+
+
+def _stop_event(client_id: str) -> asyncio.Event:
+    ev = _stop_events.get(client_id)
+    if ev is None:
+        ev = _stop_events[client_id] = asyncio.Event()
+    return ev
+
 
 @dataclass
 class AnnounceResult:
@@ -425,33 +443,66 @@ async def release_group(client_id: str) -> bool:
 async def stop(client_id: str) -> bool:
     """Cut off the reply currently playing to this client. True if one was.
 
-    This is what makes barge-in audible. The satellites already detect a stop
-    word while a reply plays -- measured at 0.93-0.996 on the Linux satellites,
-    over their own TTS, with no echo cancellation -- but detection went nowhere,
-    because the sound is not on the device. It is here, and nothing could reach
-    it.
+    KILLING THE DECODER IS NOT ENOUGH, and that is the whole lesson here.
 
-    Returns False when nothing is playing, which is not an error: a stop word
-    landing in a gap, or a moment after the answer ended, is the normal case and
-    the caller should treat it as a no-op rather than something to report.
+    This streamer pushes PCM into Snapcast far faster than it plays -- an
+    11.86s reply measured as "pushed in 5.71s" -- because "push fast, return
+    late" is deliberately more robust than `ffmpeg -re` against a network
+    hiccup (see the comment on the playback wait). So by the time a listener has
+    heard three seconds of a twelve second answer and said "stop", the entire
+    answer is already sitting in Snapcast's buffer and the decoder has nothing
+    left to send. Measured 2026-09-27: the stop arrived, the decoder died on
+    cue, and the room played the reply through to the end anyway.
 
-    ONE THING TO EXPECT: Snapcast buffers for multi-room sync, so the room keeps
-    playing whatever is already in that buffer -- roughly up to a second of
-    trailing audio after the decoder dies. Killing the source is the right cut
-    point regardless; silencing the buffer too would mean reaching into the
-    client's stream and is not worth the blast radius for a tail this short.
+    What actually stops the sound is switching the CLIENT off the announcement
+    stream. Snapcast abandons what it had buffered for that stream, so the room
+    goes quiet within its normal switch latency. Killing the decoder is still
+    right -- it stops any audio not yet pushed -- but it is the smaller half.
+
+    Returns False when nothing was playing, which is not an error: a stop word
+    landing in a gap, or a moment after the answer ended, is the normal case.
     """
+    stopped = False
+
     proc = _inflight.get(client_id)
-    if proc is None:
-        return False
-    with contextlib.suppress(Exception):
-        proc.kill()
-    # Deliberately NOT awaiting proc.wait() or removing the registry entry: the
-    # streaming coroutine still owns this process and does both in its finally.
-    # Reaping it here would race that, and a second reaper on an already-reaped
-    # process is exactly the kind of thing that only fails under load.
-    _LOGGER.info("stopped in-flight announcement for %r", client_id)
-    return True
+    if proc is not None:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        # Deliberately NOT awaiting proc.wait() or clearing the registry: the
+        # streaming coroutine still owns this process and does both in its
+        # finally. Reaping here would race it.
+        stopped = True
+
+    # Deliberately NOT taking _lock(client_id).
+    #
+    # announce() holds that lock for the whole reply, and release_group() waits
+    # on it ON PURPOSE -- correct for an exchange that ended quietly, and
+    # exactly wrong here, because preempting the in-flight announcement IS what
+    # a barge-in is. Waiting for the lock is what made the first version of this
+    # silent: it blocked until the reply it was supposed to cancel had finished.
+    live = _active_live.get(client_id) or _sticky.get(client_id, "")
+    cs = get_state().clients.get(client_id)
+    if live and cs is not None and cs.announce_group_id:
+        try:
+            await get_snap().set_group_stream(cs.announce_group_id, live)
+            _disarm_sticky(client_id)
+            _active_live.pop(client_id, None)
+            _LOGGER.info(
+                "barge-in: switched %r back to %r, abandoning buffered audio",
+                client_id, live,
+            )
+            stopped = True
+        except Exception as exc:                                 # noqa: BLE001
+            _LOGGER.warning("Could not switch %r back to %r: %s", client_id, live, exc)
+
+    # Release announce()'s playback wait so the client lock frees immediately.
+    ev = _stop_events.get(client_id)
+    if ev is not None:
+        ev.set()
+
+    if stopped:
+        _LOGGER.info("stopped in-flight announcement for %r", client_id)
+    return stopped
 
 
 async def announce(
@@ -542,6 +593,11 @@ async def announce(
                             "Switched %r stream %r → %r for announcement",
                             client_id, live_stream_id, cs.announce_stream_id,
                         )
+                    if needs_restore:
+                        # Publish it NOW, not in the finally: a barge-in during
+                        # this announcement needs to know where to put the group
+                        # back, and by the finally it is already too late.
+                        _active_live[client_id] = live_stream_id
             except Exception as exc:
                 _LOGGER.warning("Could not switch stream for %r: %s — playing anyway", client_id, exc)
 
@@ -615,7 +671,11 @@ async def announce(
             if audio_duration > 0:
                 remaining = min(audio_duration - push, _MAX_PLAYBACK_WAIT)
                 if remaining > 0:
-                    await asyncio.sleep(remaining)
+                    # Interruptible. stop() sets this, so a cancelled reply
+                    # releases the client lock immediately instead of holding it
+                    # while audio nobody can hear plays out.
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(_stop_event(client_id).wait(), remaining)
             else:
                 _LOGGER.warning(
                     "Could not probe duration of %s - returning after the push, "
@@ -634,6 +694,8 @@ async def announce(
                 client_id, audio_duration, push, duration, fmt,
             )
         finally:
+            _active_live.pop(client_id, None)
+            _stop_events.pop(client_id, None)
             if needs_restore and live_stream_id:
                 if hold_group:
                     # Leave it switched: another announcement in this exchange is
