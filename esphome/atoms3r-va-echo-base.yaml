@@ -318,7 +318,16 @@ micro_wake_word:
         condition:
           and:
             - lambda: return id(responding);
-            - lambda: 'return wake_word == "stop";'
+            # Case-insensitive, and this is why: the trigger's `wake_word`
+            # variable is the model's DECLARED wake_word string, not its `id`.
+            # The stop model declares "Stop" with a capital S, so a plain
+            # == "stop" is always false and the branch never fires -- which is
+            # exactly how this shipped the first time. The XVF3800 avoids the
+            # trap entirely by branching on state instead of comparing words.
+            - lambda: |-
+                std::string w = wake_word;
+                for (auto &ch : w) ch = tolower(ch);
+                return w == "stop";
         then:
           - logger.log: "barge-in: stop word during a reply"
           # The sound is in the room, not on this device, so this is the call that
