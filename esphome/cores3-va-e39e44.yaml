@@ -470,10 +470,21 @@ media_player:
       sample_rate: 48000
       num_channels: 1
     on_announcement:
-      # Stop the wake word (mWW or VA) if the mic is capturing
+      # Stop the wake word (mWW or VA) if the mic is capturing -- but NOT for our
+      # own reply.
+      #
+      # The `responding` guard is the same insight the display block below already
+      # applies: VA goes IDLE at tts_start, so a Snapcast-routed reply's silent
+      # local copy is indistinguishable HERE from user-initiated media playback.
+      # Stopping the engine for it is what kept barge-in dead on this device even
+      # after announce_and_wait stopped doing so -- the media player killed the
+      # mic a moment later. Ron: "it seems like while the coreS3 is playing the
+      # mic is not listening at all as if it's blocked by the playback".
       - if:
           condition:
-            - microphone.is_capturing:
+            and:
+              - microphone.is_capturing:
+              - lambda: return !id(responding);
           then:
             - script.execute: stop_wake_word
             # Ensure VA stops before moving on
@@ -1136,7 +1147,7 @@ script:
       # is set, so a false wake can no longer truncate an answer, and "stop" can
       # end one. The residual risk is an answer that itself contains the word --
       # the same trade the Linux satellites make.
-      - micro_wake_word.enable_model: stop
+      - script.execute: arm_stop_word
       - homeassistant.service:
           service: ctrlable_snapcast_tts.announce
           data:
@@ -1161,6 +1172,30 @@ script:
             - script.execute: finish_response
 
   # The single place an exchange ends once an answer was routed to Snapcast.
+  # Arm the stop word for the length of a reply.
+  #
+  # Wrapped in a script that WAITS for the announcement to start rather than
+  # arming inline, because `responding` and the media player's on_announcement
+  # race: if on_announcement wins it stops the engine, and an inline
+  # enable_model would then be arming a model inside an engine that is no longer
+  # running. Waiting until the announcement is actually in progress puts this
+  # strictly after that, and micro_wake_word.start makes it true regardless of
+  # who got there first.
+  - id: arm_stop_word
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+      - delay: 500ms
+      - micro_wake_word.start:
+      - micro_wake_word.enable_model: stop
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing:
+      - micro_wake_word.disable_model: stop
+
   - id: finish_response
     then:
       # Disarm the stop word with the exchange. Left armed it would be live
