@@ -338,6 +338,17 @@ micro_wake_word:
                 return w == "stop";
         then:
           - logger.log: "barge-in: stop word during a reply"
+          # Consume the debounce window, exactly as the normal path does.
+          #
+          # micro_wake_word fires a detection PER FRAME that crosses the cutoff,
+          # so one spoken "stop" arrives as a burst. Fire 1 barges in and
+          # finish_response clears `responding`; without this line fire 2 then
+          # passes the !responding gate, finds last_wake_ms still holding the
+          # timestamp of the ORIGINAL wake seconds ago, sails through the 1200ms
+          # debounce and starts a fresh exchange -- which hears nothing and ends
+          # in stt-no-text-recognized. Ron: "as soon as the playback of the
+          # answers stops it gets resumed right away".
+          - lambda: id(last_wake_ms) = millis();
           # The sound is in the room, not on this device, so this is the call that
           # actually silences it. media_player.stop only clears the local
           # pipeline and the assist_satellite state.
@@ -612,7 +623,15 @@ script:
           condition:
             media_player.is_announcing:
       - delay: 500ms
-      - micro_wake_word.start:
+      # Only if it is actually stopped. Calling start unconditionally logs
+      # "Wake word detection is already running" on every reply, which buries
+      # anything worth reading in the device log.
+      - if:
+          condition:
+            not:
+              micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
       - micro_wake_word.enable_model: stop
       - wait_until:
           condition:
