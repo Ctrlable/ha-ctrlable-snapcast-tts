@@ -94,6 +94,24 @@ esphome:
             state: -1
         # Run the script to refresh the LED status
         - script.execute: control_leds
+        # --- Ctrlable ---
+        # Apply the restored local-playback choice. A template switch's restore
+        # publishes its state but does NOT replay on_turn_on/on_turn_off, so
+        # without this the mixer sits unducked after every boot until someone
+        # toggles the switch -- the double playback would return on each restart.
+        - if:
+            condition:
+              switch.is_on: play_answers_locally
+            then:
+              - mixer_speaker.apply_ducking:
+                  id: announcement_mixing_input
+                  decibel_reduction: 0
+                  duration: 0s
+            else:
+              - mixer_speaker.apply_ducking:
+                  id: announcement_mixing_input
+                  decibel_reduction: 51
+                  duration: 0s
         # If after 10 minutes, the device is still initializing (It did not yet connect to Home Assistant), turn off the init_in_progress variable and run the script to refresh the LED status
         - delay: 10min
         - if:
@@ -354,6 +372,41 @@ datetime:
         - switch.turn_on: alarm_on
 
 switch:
+  # --- Ctrlable: where the answers come out ---
+  #
+  # OFF (default) = the room only, via Snapcast. ON = this device's speaker too.
+  #
+  # It was doing BOTH: measured 2026-09-27, a reply played through the room AND
+  # locally at 22%, because the announcement pipeline feeds the mixer and nothing
+  # attenuated it.
+  #
+  # Ducking announcement_mixing_input is the runtime lever. ESPHome wires audio
+  # pipelines at COMPILE time, so a switch cannot re-point the pipeline -- but the
+  # mixer input feeding it can be turned down, reaching the same audible result
+  # with no reflash.
+  #
+  # 51 dB is apply_ducking's maximum, not silence. Against a 22% starting level
+  # that sits far under the room's own audio. If it is still audible up close,
+  # the honest fix is unwiring the announcement pipeline from the mixer at
+  # compile time -- which costs the ability to switch it at all.
+  - platform: template
+    id: play_answers_locally
+    name: "Play answers on this device"
+    icon: mdi:speaker-message
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: announcement_mixing_input
+          decibel_reduction: 0
+          duration: 0s
+    on_turn_off:
+      - mixer_speaker.apply_ducking:
+          id: announcement_mixing_input
+          decibel_reduction: 51
+          duration: 0s
+
   # Mute Sound Switch.
   - platform: template
     id: mute_sound
@@ -1656,6 +1709,33 @@ micro_wake_word:
           and:
             - switch.is_off: mic_mute_switch
             - lambda: 'return (millis() - id(last_wake_ms)) > ${wake_debounce_ms};'
+            # --- Ctrlable: only "stop" interrupts a reply ---
+            #
+            # Aligns this device with the CoreS3 and AtomS3R. Those cannot let
+            # any wake word interrupt: with no AEC a reply playing in the room
+            # re-triggers them, and acting on it truncates the answer. This
+            # device has hardware AEC and never had that problem, so it allowed
+            # ANY wake word to interrupt -- meaning "Hey Maya" over a reply
+            # behaved differently in this room than in the others.
+            #
+            # Gating HERE rather than inside the state machine matters: a
+            # non-stop word heard while busy now does nothing at all. Guarding
+            # the inner branches instead would have let it fall through to the
+            # "start a new exchange" branch, the opposite of ignoring it.
+            - or:
+                # Nothing of ours is playing: any wake word may start an exchange.
+                - and:
+                    - not:
+                        voice_assistant.is_running:
+                    - not:
+                        media_player.is_announcing:
+                          id: external_media_player
+                # Something IS playing: only "stop" gets through. Lowercased,
+                # because the model declares its word as "Stop".
+                - lambda: |-
+                    std::string w = wake_word;
+                    for (auto &ch : w) ch = tolower(ch);
+                    return w == "stop";
         then:
           - lambda: id(last_wake_ms) = millis();
           - script.execute:

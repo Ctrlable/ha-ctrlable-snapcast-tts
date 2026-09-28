@@ -50,6 +50,25 @@ substitutions:
   # Collapse per-model duplicate wake detections into one, so two wake words can
   # coexist on this device. Milliseconds, compared against millis().
   wake_debounce_ms: '1200'
+
+  # --- Ctrlable: stepping around the answer saying "stop" itself ---
+  #
+  # The satellite gets the WHOLE reply text in one on_tts_start event (verified:
+  # a 30s story arrived as a single ~400-character string) and then an opaque
+  # audio stream. So it knows the word is coming but not when. These convert a
+  # character offset into a predicted time.
+  #
+  # Rate: TTS runs ~150-180 wpm, so 13-16 chars/sec. 14 is the middle.
+  tts_chars_per_sec: '14.0'
+  # The mic hears the ROOM, not this device: audio reaches the speakers through
+  # Snapcast, which buffers for multi-room sync, so every prediction is late by
+  # roughly that buffer.
+  snapcast_lag_s: '1.0'
+  # Guard half-width. Grows with distance into the reply because the estimate
+  # drifts -- punctuation pauses, numbers read long ("1995" is five syllables),
+  # per-voice rate. 1.5s at the start, ~5s by 25s in.
+  stop_guard_base_s: '1.5'
+  stop_guard_rate: '0.15'
   chime_lead_in: 250ms
 
   # Blank the screen after this long at rest. Touch or a wake word brings it
@@ -218,7 +237,62 @@ captive_portal:
 logger:
   level: DEBUG
 
+# --- Ctrlable: arm the stop word except while the answer is saying it ---
+#
+# Polled rather than scheduled with delays: a reply can mention "stop" several
+# times, and building a chain of templated delays for each is far more fragile
+# than asking "are we inside a window right now?" four times a second.
+#
+# Acts only on a CHANGE, so a reply that never says it costs two calls in total.
+interval:
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (!id(responding)) return false;
+              float el = (millis() - id(playback_start_ms)) / 1000.0f;
+              for (float c : id(stop_mute_windows)) {
+                float g = ${stop_guard_base_s} + ${stop_guard_rate} * c;
+                if (el > c - g && el < c + g) return false;   // inside: stay disarmed
+              }
+              return !id(stop_model_armed);
+          then:
+            - micro_wake_word.enable_model: stop
+            - lambda: id(stop_model_armed) = true;
+      - if:
+          condition:
+            lambda: |-
+              if (!id(stop_model_armed)) return false;
+              if (!id(responding)) return false;
+              float el = (millis() - id(playback_start_ms)) / 1000.0f;
+              for (float c : id(stop_mute_windows)) {
+                float g = ${stop_guard_base_s} + ${stop_guard_rate} * c;
+                if (el > c - g && el < c + g) return true;    // inside: disarm
+              }
+              return false;
+          then:
+            - micro_wake_word.disable_model: stop
+            - lambda: id(stop_model_armed) = false;
+            - logger.log: "stop word disarmed: the answer is about to say it"
+
 globals:
+  # --- Ctrlable: predicted times this answer says "stop" ---
+  # Seconds from playback start. Cleared at the end of every reply.
+  - id: stop_mute_windows
+    type: std::vector<float>
+    restore_value: no
+  - id: playback_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Tracked so the interval only calls enable/disable on a CHANGE, rather than
+  # four times a second forever.
+  - id: stop_model_armed
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
   - id: init_in_progress
     type: bool
     restore_value: no
@@ -740,6 +814,23 @@ voice_assistant:
         state: !lambda return x;
     - script.execute: draw_display
   on_tts_start:
+    # --- Ctrlable ---
+    # Predict when this answer will say "stop", so the stop word is disarmed for
+    # those moments only. Substring, not word-boundary: the model fires on
+    # "stopped" and "stopping" too, so those have to be guarded as well.
+    - lambda: |-
+        id(stop_mute_windows).clear();
+        std::string t = x;
+        for (auto &ch : t) ch = tolower(ch);
+        size_t pos = 0;
+        while ((pos = t.find("stop", pos)) != std::string::npos) {
+          id(stop_mute_windows).push_back(
+              ${snapcast_lag_s} + (float) pos / ${tts_chars_per_sec});
+          pos += 4;
+        }
+        if (!id(stop_mute_windows).empty())
+          ESP_LOGI("ctrlable", "reply says 'stop' %d time(s); first at ~%.1fs",
+                   (int) id(stop_mute_windows).size(), id(stop_mute_windows)[0]);
     - text_sensor.template.publish:
         id: text_response
         state: !lambda return x;
@@ -1198,6 +1289,8 @@ script:
       - wait_until:
           condition:
             media_player.is_announcing:
+      # The clock the predictions are measured from.
+      - lambda: id(playback_start_ms) = millis();
       - delay: 500ms
       # Only if it is actually stopped. Calling start unconditionally logs
       # "Wake word detection is already running" on every reply, which buries
@@ -1208,12 +1301,19 @@ script:
               micro_wake_word.is_running:
           then:
             - micro_wake_word.start:
-      - micro_wake_word.enable_model: stop
+      # Arming is the interval's job from here -- it steps the model around the
+      # moments this answer says "stop" itself, instead of disarming for the whole
+      # reply. A 30s story that mentions stopping stays interruptible for the
+      # other 28s, which matters because long answers are exactly the ones worth
+      # cutting off.
       - wait_until:
           condition:
             not:
               media_player.is_announcing:
       - micro_wake_word.disable_model: stop
+      - lambda: |-
+          id(stop_model_armed) = false;
+          id(stop_mute_windows).clear();
 
   - id: finish_response
     then:
