@@ -13,6 +13,12 @@ long as that connection stays open. No IP is compiled in or typed in.
 It listens alongside micro_wake_word and voice_assistant through its own
 MicrophoneSource; the I2S driver counts listeners, so starting or stopping the
 stream never starts or stops the mic under them.
+
+`reference:` (optional) takes the room's mix BACK from the server and plays it
+into the XVF3800's echo-reference input through one more mixer source, with
+the DAC muted, so the XVF's own canceller can remove the Snapcast audio. It is
+only opened while a server offers it AND the device's answers play in the room;
+in local mode the XVF hears its own output and nothing runs.
 """
 
 import esphome.codegen as cg
@@ -27,9 +33,32 @@ CONF_CONTROL_PORT = "control_port"
 CONF_TOKEN = "token"
 CONF_PAYLOAD_TYPE = "payload_type"
 CONF_PACKET_MS = "packet_ms"
+CONF_REFERENCE = "reference"
+CONF_SOURCE_SPEAKER = "source_speaker"
+CONF_MIXER = "mixer"
+CONF_PORT = "port"
+CONF_QUEUE_MS = "queue_ms"
 
 rtp_mic_ns = cg.esphome_ns.namespace("rtp_mic")
 RtpMic = rtp_mic_ns.class_("RtpMic", cg.Component)
+mixer_speaker_ns = cg.esphome_ns.namespace("mixer_speaker")
+MixerSpeaker = mixer_speaker_ns.class_("MixerSpeaker", cg.Component)
+Speaker = cg.esphome_ns.namespace("speaker").class_("Speaker")
+
+REFERENCE_SCHEMA = cv.Schema(
+    {
+        # A source speaker of `mixer`, used for nothing else. Its audio reaches
+        # the XVF on I2S at full scale; what the room hears is the DAC, which
+        # this device keeps muted while answers go to Snapcast.
+        cv.Required(CONF_SOURCE_SPEAKER): cv.use_id(Speaker),
+        cv.Required(CONF_MIXER): cv.use_id(MixerSpeaker),
+        cv.Optional(CONF_PORT, default=6056): cv.port,
+        # Output pipeline depth the reference is kept topped up to. Lower is
+        # less delay; too low and an I2S underrun inserts silence, which moves
+        # the alignment until the server's next re-anchor.
+        cv.Optional(CONF_QUEUE_MS, default=20): cv.int_range(10, 80),
+    }
+)
 
 
 CONFIG_SCHEMA = cv.Schema(
@@ -52,6 +81,7 @@ CONFIG_SCHEMA = cv.Schema(
         # 20 ms is the RTP audio norm and what PipeWire's receiver expects to
         # size its jitter buffer around; shorter wastes Wi-Fi airtime on headers.
         cv.Optional(CONF_PACKET_MS, default=20): cv.int_range(5, 40),
+        cv.Optional(CONF_REFERENCE): REFERENCE_SCHEMA,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -76,3 +106,8 @@ async def to_code(config):
     cg.add(var.set_control_port(config[CONF_CONTROL_PORT]))
     if config[CONF_TOKEN]:
         cg.add(var.set_token(config[CONF_TOKEN]))
+    if ref := config.get(CONF_REFERENCE):
+        cg.add_define("USE_RTP_MIC_REFERENCE")
+        source = await cg.get_variable(ref[CONF_SOURCE_SPEAKER])
+        mixer = await cg.get_variable(ref[CONF_MIXER])
+        cg.add(var.set_reference(source, mixer, ref[CONF_PORT], ref[CONF_QUEUE_MS]))

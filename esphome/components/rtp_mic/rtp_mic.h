@@ -2,6 +2,12 @@
 
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/core/component.h"
+#include "esphome/core/defines.h"
+
+#ifdef USE_RTP_MIC_REFERENCE
+#include "esphome/components/mixer/speaker/mixer_speaker.h"
+#include "esphome/components/speaker/speaker.h"
+#endif
 
 #include "rtp_core.h"
 #include "rtp_session.h"
@@ -40,6 +46,21 @@ class RtpMic : public Component {
   uint32_t get_packets_sent() const { return this->packets_sent_.load(); }
   uint32_t get_packets_dropped() const { return this->packets_dropped_.load(); }
 
+  // The echo reference (see rtp_core.h). `local` = this device plays its
+  // answers itself: the XVF then hears its own output and needs no reference,
+  // so the device declines it and the server stops sending. Call from the
+  // "Play answers on this device" switch.
+  void set_answers_local(bool local);
+  bool is_reference_active() const { return this->ref_active_.load(); }
+#ifdef USE_RTP_MIC_REFERENCE
+  void set_reference(speaker::Speaker *source, mixer_speaker::MixerSpeaker *mixer, uint16_t port, uint32_t queue_ms) {
+    this->ref_speaker_ = source;
+    this->ref_mixer_ = mixer;
+    this->ref_port_ = port;
+    this->ref_queue_ms_ = queue_ms;
+  }
+#endif
+
  protected:
   struct Conn {
     int fd{-1};
@@ -54,6 +75,8 @@ class RtpMic : public Component {
   void serve_(Conn &c);
   bool close_(Conn &c);
   void apply_session_();
+  void apply_reference_();
+  void feed_reference_();
 
   microphone::MicrophoneSource *source_{nullptr};
   uint8_t payload_type_{96};
@@ -84,6 +107,27 @@ class RtpMic : public Component {
   std::atomic<uint32_t> packets_sent_{0};
   std::atomic<uint32_t> packets_dropped_{0};
   uint32_t last_report_ms_{0};
+
+  // Echo reference. Touched by the main loop only to open/close/re-anchor,
+  // under ref_lock_; everything per-packet happens on the mic task.
+  bool answers_local_{false};
+  std::atomic<bool> ref_active_{false};
+#ifdef USE_RTP_MIC_REFERENCE
+  speaker::Speaker *ref_speaker_{nullptr};
+  mixer_speaker::MixerSpeaker *ref_mixer_{nullptr};
+  uint16_t ref_port_{6056};
+  uint32_t ref_queue_ms_{20};
+  std::mutex ref_lock_;
+  int ref_sock_{-1};
+  uint32_t ref_peer_{0};
+  uint16_t ref_delay_ms_{0};
+  std::unique_ptr<rtp_mic_core::RefJitterBuffer> ref_jb_;
+  rtp_mic_core::Upsampler3 ref_up_;
+  std::vector<uint8_t> ref_pkt_;
+  std::vector<int16_t> ref16_;
+  std::vector<int16_t> ref48_;
+  uint32_t ref_foreign_{0};
+#endif
 };
 
 }  // namespace esphome::rtp_mic

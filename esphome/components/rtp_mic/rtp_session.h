@@ -11,12 +11,21 @@
 //
 // THE PROTOCOL. One text line per request, '\n'-terminated:
 //
-//   START <udp_port> [beam=asr|wakeword] [token=<t>]
-//       -> OK STREAMING format=L16/16000/1 pt=96 ssrc=<hex> beam=<b> port=<p>
-//   KEEPALIVE              -> OK ALIVE
+//   START <udp_port> [beam=asr|wakeword] [ref=<ms>] [token=<t>]
+//       -> OK STREAMING format=L16/16000/1 pt=96 ssrc=<hex> beam=<b> port=<p> [ref=<udp>|ref=off]
+//   KEEPALIVE              -> OK ALIVE [ref=<udp>|ref=off]
 //   STOP                   -> OK STOPPED
 //   STATUS                 -> OK IDLE | OK STREAMING to=<ip>:<port> beam=<b>
 //   anything else          -> ERR bad-request
+//
+// THE ECHO REFERENCE. `ref=<ms>` is the server OFFERING the room's mix back,
+// to be played into the XVF3800's reference input <ms> behind its arrival.
+// The device answers where to send it (`ref=<udp port>`) or that it does not
+// want it (`ref=off`: it plays its answers itself, so the XVF already hears
+// its own output). KEEPALIVE repeats that answer every time, so flipping the
+// device between Snapcast and local answers starts or stops the server's
+// sender within one keepalive -- and costs nothing on either side while off.
+// A server that does not offer gets the old replies, unchanged.
 //
 // A session lives exactly as long as its TCP connection AND keeps talking:
 // closing the connection ends it, and so does IDLE_TIMEOUT without a line
@@ -53,11 +62,14 @@ struct Session {
   uint16_t port{0};
   Beam beam{Beam::ASR};
   uint32_t last_seen_ms{0};
+  bool ref_offered{false};
+  uint16_t ref_delay_ms{0};
 };
 
 class SessionTable {
  public:
   static constexpr uint32_t IDLE_TIMEOUT_MS = 30000;
+  static constexpr long MAX_REF_DELAY_MS = 250;  // half the device's 512 ms jitter ring
 
   // token: empty means no authentication (see the package's rtp_mic_token).
   explicit SessionTable(std::string token = "") : token_(std::move(token)) {}
@@ -65,6 +77,11 @@ class SessionTable {
   void set_enabled(bool enabled) { this->enabled_ = enabled; }
   bool enabled() const { return this->enabled_; }
   const Session &current() const { return this->session_; }
+
+  // The UDP port the device takes a reference on, or 0 when it does not want
+  // one (no reference wired, or answers play locally).
+  void set_ref_port(uint16_t port) { this->ref_port_ = port; }
+  uint16_t ref_port() const { return this->ref_port_; }
 
   Reply handle_line(int conn, uint32_t peer_ip, const std::string &peer_text, const std::string &raw, uint32_t now,
                     uint32_t ssrc, uint8_t payload_type) {
@@ -79,7 +96,7 @@ class SessionTable {
     if (verb == "KEEPALIVE") {
       if (this->owns_(conn)) {
         this->session_.last_seen_ms = now;
-        return {"OK ALIVE"};
+        return {"OK ALIVE" + this->ref_answer_()};
       }
       return {"ERR no-session"};
     }
@@ -153,6 +170,8 @@ class SessionTable {
       return {"ERR bad-port", true};
 
     Beam beam = Beam::ASR;
+    bool ref_offered = false;
+    long ref_delay = 0;
     std::string token;
     while (!rest.empty()) {
       split_first_(rest, tok, rest);
@@ -160,6 +179,13 @@ class SessionTable {
         beam = Beam::ASR;
       } else if (tok == "beam=wakeword") {
         beam = Beam::WAKEWORD;
+      } else if (tok.rfind("ref=", 0) == 0) {
+        const std::string v = tok.substr(4);
+        char *vend = nullptr;
+        ref_delay = std::strtol(v.c_str(), &vend, 10);
+        if (v.empty() || vend == nullptr || *vend != '\0' || ref_delay < 0 || ref_delay > MAX_REF_DELAY_MS)
+          return {"ERR bad-ref", true};
+        ref_offered = true;
       } else if (tok.rfind("token=", 0) == 0) {
         token = tok.substr(6);
       } else if (!tok.empty()) {
@@ -176,7 +202,9 @@ class SessionTable {
       return {"ERR busy held-by=" + this->session_.ip_text, true};
 
     const bool changed = !this->session_.active || this->session_.ip != peer_ip ||
-                         this->session_.port != static_cast<uint16_t>(port) || this->session_.beam != beam;
+                         this->session_.port != static_cast<uint16_t>(port) || this->session_.beam != beam ||
+                         this->session_.ref_offered != ref_offered ||
+                         this->session_.ref_delay_ms != static_cast<uint16_t>(ref_delay);
     this->session_.active = true;
     this->session_.conn = conn;
     this->session_.ip = peer_ip;
@@ -184,6 +212,8 @@ class SessionTable {
     this->session_.port = static_cast<uint16_t>(port);
     this->session_.beam = beam;
     this->session_.last_seen_ms = now;
+    this->session_.ref_offered = ref_offered;
+    this->session_.ref_delay_ms = static_cast<uint16_t>(ref_delay);
 
     char ssrc_hex[9];
     static const char *const HEX = "0123456789abcdef";
@@ -191,11 +221,19 @@ class SessionTable {
       ssrc_hex[i] = HEX[(ssrc >> (28 - 4 * i)) & 0xf];
     ssrc_hex[8] = '\0';
     return {"OK STREAMING format=L16/16000/1 pt=" + std::to_string(payload_type) + " ssrc=" + ssrc_hex +
-                " beam=" + beam_name(beam) + " port=" + std::to_string(port),
+                " beam=" + beam_name(beam) + " port=" + std::to_string(port) + this->ref_answer_(),
             false, changed};
   }
 
+  // Only to a server that offered: an old manager sees the old replies.
+  std::string ref_answer_() const {
+    if (!this->session_.ref_offered)
+      return "";
+    return this->ref_port_ ? " ref=" + std::to_string(this->ref_port_) : std::string(" ref=off");
+  }
+
   std::string token_;
+  uint16_t ref_port_{0};
   bool enabled_{true};
   Session session_;
 };

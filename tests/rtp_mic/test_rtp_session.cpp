@@ -135,6 +135,37 @@ int main() {
     CHECK(starts_with(t.handle_line(1, BETA, "b", "START 46000", 0, 1, 96).line, "OK"), "works again when on");
   }
 
+  // 8. the echo reference offer.
+  {
+    SessionTable t;
+    t.set_ref_port(6056);
+    Reply plain = t.handle_line(1, BETA, "b", "START 46000", 0, 1, 96);
+    CHECK(plain.line.find("ref=") == std::string::npos, "no offer, no ref answer: an old manager sees old replies");
+    CHECK(t.handle_line(1, BETA, "b", "KEEPALIVE", 5, 1, 96).line == "OK ALIVE", "old keepalive reply unchanged");
+
+    Reply r = t.handle_line(1, BETA, "b", "START 46000 beam=asr ref=60", 10, 1, 96);
+    CHECK(r.line.find(" ref=6056") != std::string::npos, "offer answered with the reference port");
+    CHECK(r.changed, "taking up the offer is a change (the device must open the port)");
+    CHECK(t.current().ref_offered && t.current().ref_delay_ms == 60, "offer and delay kept");
+    CHECK(t.handle_line(1, BETA, "b", "KEEPALIVE", 20, 1, 96).line == "OK ALIVE ref=6056", "keepalive repeats it");
+
+    // The device switched to playing answers itself: the server must hear so.
+    t.set_ref_port(0);
+    CHECK(t.handle_line(1, BETA, "b", "KEEPALIVE", 30, 1, 96).line == "OK ALIVE ref=off", "local mode says off");
+    Reply again = t.handle_line(1, BETA, "b", "START 46000 beam=asr ref=60", 40, 1, 96);
+    CHECK(again.line.find(" ref=off") != std::string::npos && !again.changed, "re-START in local mode: off");
+
+    CHECK(t.handle_line(2, BETA, "b", "START 46000 ref=", 50, 1, 96).line == "ERR bad-ref", "empty delay refused");
+    CHECK(t.handle_line(2, BETA, "b", "START 46000 ref=-5", 50, 1, 96).line == "ERR bad-ref", "negative refused");
+    CHECK(t.handle_line(2, BETA, "b", "START 46000 ref=900", 50, 1, 96).line == "ERR bad-ref",
+          "beyond the device's jitter ring refused, not silently clipped");
+    CHECK(t.handle_line(2, BETA, "b", "START 46000 ref=40ms", 50, 1, 96).close, "garbage closes");
+    CHECK(t.current().ref_delay_ms == 60, "bad offers leave the live session alone");
+
+    Reply d = t.handle_line(1, BETA, "b", "START 46000 beam=asr ref=80", 60, 1, 96);
+    CHECK(d.changed && t.current().ref_delay_ms == 80, "a new delay is a change (the buffer must re-anchor)");
+  }
+
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return 1;

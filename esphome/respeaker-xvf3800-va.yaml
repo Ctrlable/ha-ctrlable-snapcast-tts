@@ -83,11 +83,21 @@ substitutions:
   # lands during listening -- matching the other two satellites.
   chime_lead_in: 250ms
 
-# Mic over RTP to the server, for server-side echo cancelling and an optional
-# server wake word. Off until the hardware manager sets a destination and turns
-# it on; see the package for why.
+# Mic over RTP to the server, for an optional server wake word, and the room's
+# mix back from it as the XVF3800's echo reference. The device only listens
+# (TCP 6055); nothing streams until the hardware manager connects and asks.
+# See the package for why.
 packages:
   rtp_mic: !include packages/ctrlable_rtp_mic.yaml
+
+# Merged into the package's rtp_mic. The reference plays through its own mixer
+# source into the XVF's I2S input -- the XVF's echo reference -- while the DAC
+# stays muted, so the room never hears it. Used only while answers go to
+# Snapcast; see "Play answers on this device".
+rtp_mic:
+  reference:
+    source_speaker: ref_mixing_input
+    mixer: mixing_speaker
 
 esphome:
   name: respeaker-xvf3800
@@ -134,6 +144,8 @@ esphome:
                   id: announcement_mixing_input
                   decibel_reduction: 51
                   duration: 0s
+        - lambda: id(rtp).set_answers_local(id(play_answers_locally).state);
+        - script.execute: apply_output_volume
         # If after 10 minutes, the device is still initializing (It did not yet connect to Home Assistant), turn off the init_in_progress variable and run the script to refresh the LED status
         - delay: 10min
         - if:
@@ -175,6 +187,11 @@ esp32:
       CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
 
       CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+
+      # rtp_mic's echo reference arrives as 100 small UDP packets a second and
+      # is drained every ~5 ms. lwIP's default queue of 6 holds 60 ms -- one
+      # Wi-Fi retry burst. 16 holds 160 ms; it costs pointers, not buffers.
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "16"
       CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
 
 wifi:
@@ -409,9 +426,15 @@ datetime:
 switch:
   # --- Ctrlable: where the answers come out ---
   #
-  # OFF (default) = the room only, via Snapcast. ON = this device's speaker too.
+  # OFF (default) = the ROOM, via the Snapcast TTS add-on. The device stays
+  #   silent (DAC muted) and, while the hardware manager holds a session, takes
+  #   the room's mix back as the XVF's echo reference.
+  # ON = THIS DEVICE only, at the media player's volume. No Snapcast announce,
+  #   and no echo reference: the XVF hears its own output and cancels it
+  #   natively, so the reference leg is declined and costs nothing on either
+  #   end. Room music played through Snapcast is then NOT cancelled.
   #
-  # It was doing BOTH: measured 2026-09-27, a reply played through the room AND
+  # It once did BOTH: measured 2026-09-27, a reply played through the room AND
   # locally at 22%, because the announcement pipeline feeds the mixer and nothing
   # attenuated it.
   #
@@ -436,11 +459,16 @@ switch:
           id: announcement_mixing_input
           decibel_reduction: 0
           duration: 0s
+      - lambda: id(rtp).set_answers_local(true);
+      - script.execute: apply_output_volume
     on_turn_off:
+      # DAC muted BEFORE the reference may start: the reference is full scale.
+      - script.execute: apply_output_volume
       - mixer_speaker.apply_ducking:
           id: announcement_mixing_input
           decibel_reduction: 51
           duration: 0s
+      - lambda: id(rtp).set_answers_local(false);
 
   # Mute Sound Switch.
   - platform: template
@@ -658,28 +686,53 @@ script:
   #
   # The call is fire-and-forget; completion comes back the other way via
   # ${snapcast_announcing_entity}.
+  #
+  # Local mode ("Play answers on this device" ON) sends nothing: the media
+  # player is already playing the answer here, and the exchange ends the stock
+  # way. `responding` stays false, so on_end releases the zone the wake word
+  # held.
   - id: announce_and_wait
     mode: restart
     then:
-      - lambda: id(responding) = true;
-      - homeassistant.service:
-          service: ctrlable_snapcast_tts.announce
-          data:
-            url: !lambda return id(last_tts_url);
-            satellite_id: !lambda return App.get_name();
-            wake_word: !lambda return id(current_wake_word);
-            # Published raw even though the pipelines get 0.0 -- see the
-            # media_player comment.
-            volume: !lambda return to_string((int)(id(external_media_player).volume * 100));
-      # Only fires if the completion signal never arrives: HA down, integration
-      # too old to expose the sensor, or the sensor wedged ON.
-      - delay: ${announce_max_wait}
       - if:
           condition:
-            lambda: return id(responding);
+            switch.is_on: play_answers_locally
           then:
-            - logger.log: "announce completion signal never arrived; releasing on backstop"
-            - script.execute: finish_response
+            - logger.log: "answer plays on this device (local mode); not sent to Snapcast"
+          else:
+            - lambda: id(responding) = true;
+            - homeassistant.service:
+                service: ctrlable_snapcast_tts.announce
+                data:
+                  url: !lambda return id(last_tts_url);
+                  satellite_id: !lambda return App.get_name();
+                  wake_word: !lambda return id(current_wake_word);
+                  # Published raw even though the pipelines get 0.0 -- see the
+                  # media_player comment.
+                  volume: !lambda return to_string((int)(id(external_media_player).volume * 100));
+            # Only fires if the completion signal never arrives: HA down, integration
+            # too old to expose the sensor, or the sensor wedged ON.
+            - delay: ${announce_max_wait}
+            - if:
+                condition:
+                  lambda: return id(responding);
+                then:
+                  - logger.log: "announce completion signal never arrived; releasing on backstop"
+                  - script.execute: finish_response
+
+  # The device's own loudness. Every pipeline gets 0.0 from the media player
+  # (volume_min/max below), which reaches the shared I2S speaker and so the
+  # DAC: muted. Local mode overrides that at the DAC with the user's slider;
+  # Snapcast mode pins it at 0, which the AIC3104 writes as its mute bit.
+  # Re-applied after every volume, mute and announcement event, because the
+  # media player re-sends its 0.0 on those.
+  - id: apply_output_volume
+    then:
+      - lambda: |-
+          float v = 0.0f;
+          if (id(play_answers_locally).state && !id(external_media_player).is_muted())
+            v = id(external_media_player).volume;
+          id(i2s_audio_speaker).set_volume(v);
 
   # The single place an exchange ends once an answer was routed to Snapcast.
   - id: finish_response
@@ -1537,6 +1590,9 @@ speaker:
         timeout: never
       - id: media_mixing_input
         timeout: never
+      # The echo reference (rtp_mic). Started and stopped by rtp_mic itself.
+      - id: ref_mixing_input
+        timeout: 2s
 
   # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
   - platform: resampler
@@ -1625,19 +1681,23 @@ media_player:
     volume_min: 0.0
     volume_max: 0.0
     on_mute:
+      - script.execute: apply_output_volume
       - delay: 100ms  # Debounce
       - script.execute: control_leds_volume_changed
     on_unmute:
+      - script.execute: apply_output_volume
       - delay: 100ms  # Debounce
       - script.execute: control_leds_volume_changed
     on_volume:
-      if:
-        condition:
-          - lambda: return !id(init_in_progress);
-        then:
-          - delay: 100ms  # Debounce
-          - script.execute: control_leds_volume_changed
+      - script.execute: apply_output_volume
+      - if:
+          condition:
+            - lambda: return !id(init_in_progress);
+          then:
+            - delay: 100ms  # Debounce
+            - script.execute: control_leds_volume_changed
     on_announcement:
+      - script.execute: apply_output_volume
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
           decibel_reduction: 20

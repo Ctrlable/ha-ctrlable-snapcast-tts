@@ -37,6 +37,13 @@
 # beam, channel 1 = wake-word output. The manager picks the beam per session
 # (`beam=asr|wakeword`), so a wrong guess here is a manager setting, not a
 # reflash.
+#
+# ECHO REFERENCE. The manager may offer the room's mix back (`ref=<ms>` on
+# START); a device whose config wires `rtp_mic: reference:` takes it on udp/6056
+# and plays it, silently, into the XVF3800's echo-reference input. Server-side
+# cancelling of the XVF's output does not work (measured 2026-10-10: 0.0-0.3
+# dB) because that output is already non-linearly processed; the canceller has
+# to be the XVF's own. Declined while the device plays its answers itself.
 
 substitutions:
   rtp_mic_token: ""
@@ -60,6 +67,9 @@ mdns:
         format: L16/16000/1
         control: tcp-line/1
         beams: asr,wakeword
+        # Takes the room's mix back as the echo reference when the device's
+        # own config wires `reference:` (see the XVF3800 satellite).
+        reference: L16/16000/1
 
 switch:
   # ON by default, and why that is safe: in the pull model nothing streams

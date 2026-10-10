@@ -17,6 +17,9 @@ static const uint32_t OUT_RATE = 16000;
 static const uint32_t REPORT_INTERVAL_MS = 60000;
 // A request line is ~60 bytes. Anything this long is not the manager.
 static const size_t MAX_LINE = 256;
+// Most reference samples pushed per mic callback (30 ms): bounds the work done
+// on the mic task, and the catch-up after a stall.
+static const size_t REF_CHUNK = 480;
 
 static void set_nonblocking(int fd) {
   const int flags = lwip_fcntl(fd, F_GETFL, 0);
@@ -49,6 +52,14 @@ void RtpMic::setup() {
 
   this->source_->add_data_callback([this](const std::vector<uint8_t> &data) { this->on_audio_(data); });
   this->open_control_();
+#ifdef USE_RTP_MIC_REFERENCE
+  // 16 KB of ring, allocated once; nothing else is held while no reference runs.
+  this->ref_jb_ = make_unique<rtp_mic_core::RefJitterBuffer>();
+  this->ref_pkt_.resize(1500);
+  this->ref16_.resize(REF_CHUNK);
+  this->ref48_.resize(3 * REF_CHUNK);
+#endif
+  this->apply_reference_();
 }
 
 void RtpMic::open_control_() {
@@ -98,7 +109,119 @@ std::string RtpMic::get_client() const {
   const auto &s = this->sessions_.current();
   if (!s.active)
     return "";
-  return s.ip_text + ":" + std::to_string(s.port) + " (" + rtp_mic_core::beam_name(s.beam) + ")";
+  return s.ip_text + ":" + std::to_string(s.port) + " (" + rtp_mic_core::beam_name(s.beam) +
+         (this->ref_active_.load() ? ", echo ref)" : ")");
+}
+
+void RtpMic::set_answers_local(bool local) {
+  if (local == this->answers_local_)
+    return;
+  this->answers_local_ = local;
+  ESP_LOGI(TAG, "answers play %s: echo reference %s", local ? "on this device" : "in the room",
+           local ? "not needed" : "wanted");
+  this->apply_reference_();
+}
+
+// Opens or closes the reference leg to match the session and the answer mode.
+// Main loop only. Without a `reference:` block this just keeps saying "off".
+void RtpMic::apply_reference_() {
+#ifdef USE_RTP_MIC_REFERENCE
+  const bool wired = this->ref_speaker_ != nullptr && this->ref_mixer_ != nullptr && !this->is_failed();
+  this->sessions_.set_ref_port(wired && !this->answers_local_ ? this->ref_port_ : 0);
+  const auto &s = this->sessions_.current();
+  const bool want = wired && s.active && s.ref_offered && !this->answers_local_;
+  if (want) {
+    if (this->ref_active_.load() && s.ip == this->ref_peer_ && s.ref_delay_ms == this->ref_delay_ms_)
+      return;
+    std::lock_guard<std::mutex> guard(this->ref_lock_);
+    if (this->ref_sock_ < 0) {
+      this->ref_sock_ = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      struct sockaddr_in addr {};
+      addr.sin_family = AF_INET;
+      addr.sin_addr.s_addr = htonl(INADDR_ANY);
+      addr.sin_port = htons(this->ref_port_);
+      if (this->ref_sock_ < 0 ||
+          lwip_bind(this->ref_sock_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "cannot take the echo reference on udp/%u: %d", this->ref_port_, errno);
+        if (this->ref_sock_ >= 0)
+          lwip_close(this->ref_sock_);
+        this->ref_sock_ = -1;
+        return;
+      }
+      set_nonblocking(this->ref_sock_);
+    }
+    this->ref_peer_ = s.ip;
+    this->ref_delay_ms_ = s.ref_delay_ms;
+    this->ref_jb_->set_delay(16u * s.ref_delay_ms);
+    this->ref_up_.reset();
+    this->ref_foreign_ = 0;
+    if (!this->ref_active_.load()) {
+      // Mono 16-bit at the mixer's rate; the mixer widens it to the I2S format.
+      // Its volume is the shared output's, i.e. the DAC: muted at 0, while the
+      // XVF still receives the reference at full scale on I2S.
+      audio::AudioStreamInfo info(16, 1, 48000);
+      this->ref_speaker_->set_audio_stream_info(info);
+      this->ref_speaker_->start();
+      this->ref_active_.store(true);
+    }
+    ESP_LOGI(TAG, "echo reference from %s on udp/%u, %u ms behind arrival", s.ip_text.c_str(), this->ref_port_,
+             (unsigned) s.ref_delay_ms);
+    return;
+  }
+  if (!this->ref_active_.load() && this->ref_sock_ < 0)
+    return;
+  {
+    std::lock_guard<std::mutex> guard(this->ref_lock_);
+    this->ref_active_.store(false);
+    if (this->ref_sock_ >= 0)
+      lwip_close(this->ref_sock_);
+    this->ref_sock_ = -1;
+  }
+  this->ref_speaker_->stop();
+  ESP_LOGI(TAG, "echo reference stopped (%u packets, %u late samples, %u re-anchors, %u trims)",
+           (unsigned) this->ref_jb_->packets(), (unsigned) this->ref_jb_->late_samples(),
+           (unsigned) this->ref_jb_->resyncs(), (unsigned) this->ref_jb_->trims());
+#endif
+}
+
+// Mic task, once per mic read (~5 ms). The mic and the speaker share the
+// XVF3800's I2S clock, so this is the one place that can pace the reference
+// to what the XVF actually consumes -- no task, no timer of its own.
+void RtpMic::feed_reference_() {
+#ifdef USE_RTP_MIC_REFERENCE
+  if (!this->ref_active_.load())
+    return;
+  std::lock_guard<std::mutex> guard(this->ref_lock_);
+  if (this->ref_sock_ < 0)
+    return;
+  for (;;) {
+    struct sockaddr_in from {};
+    socklen_t from_len = sizeof(from);
+    const int n = lwip_recvfrom(this->ref_sock_, this->ref_pkt_.data(), this->ref_pkt_.size(), 0,
+                                reinterpret_cast<struct sockaddr *>(&from), &from_len);
+    if (n <= 0)
+      break;
+    if (from.sin_addr.s_addr != this->ref_peer_) {
+      ++this->ref_foreign_;  // only the session's own server may drive the canceller
+      continue;
+    }
+    rtp_mic_core::RtpView v;
+    if (rtp_mic_core::parse_rtp(this->ref_pkt_.data(), n, v))
+      this->ref_jb_->put(v.ts, v.marker, v.payload, v.payload_len / 2);
+  }
+  // Top the output pipeline up to the queue target: what the I2S consumed
+  // since last time, so the reference runs at exactly the XVF's clock.
+  const uint32_t queued = this->ref_mixer_->get_frames_in_pipeline();
+  const uint32_t target = 48u * this->ref_queue_ms_;
+  if (queued >= target)
+    return;
+  size_t n16 = (target - queued + 2) / 3;
+  if (n16 > REF_CHUNK)
+    n16 = REF_CHUNK;
+  this->ref_jb_->take(this->ref16_.data(), n16);
+  this->ref_up_.process(this->ref16_.data(), n16, this->ref48_.data());
+  this->ref_speaker_->play(reinterpret_cast<const uint8_t *>(this->ref48_.data()), 6 * n16, 0);
+#endif
 }
 
 void RtpMic::accept_() {
@@ -204,12 +327,14 @@ void RtpMic::apply_session_() {
       this->source_->start();
     }
     ESP_LOGI(TAG, "streaming %s beam to %s:%u", rtp_mic_core::beam_name(s.beam), s.ip_text.c_str(), s.port);
+    this->apply_reference_();
     return;
   }
   {
     std::lock_guard<std::mutex> guard(this->addr_lock_);
     this->addr_valid_ = false;
   }
+  this->apply_reference_();
   if (this->streaming_.load()) {
     this->streaming_.store(false);
     this->source_->stop();
@@ -236,6 +361,15 @@ void RtpMic::loop() {
       this->last_report_ms_ = now;
       ESP_LOGD(TAG, "to %s: sent %u, dropped %u", this->get_client().c_str(), (unsigned) this->packets_sent_.load(),
                (unsigned) this->packets_dropped_.load());
+#ifdef USE_RTP_MIC_REFERENCE
+      // Read without the lock: counters for a log line, a torn read is harmless.
+      if (this->ref_active_.load()) {
+        ESP_LOGD(TAG, "echo ref: %u packets, %u late samples, %u re-anchors, %u trims, drift %d samples, %u foreign",
+                 (unsigned) this->ref_jb_->packets(), (unsigned) this->ref_jb_->late_samples(),
+                 (unsigned) this->ref_jb_->resyncs(), (unsigned) this->ref_jb_->trims(),
+                 (int) this->ref_jb_->drift_samples(), (unsigned) this->ref_foreign_);
+      }
+#endif
     }
   }
 }
@@ -244,6 +378,7 @@ void RtpMic::loop() {
 void RtpMic::on_audio_(const std::vector<uint8_t> &data) {
   if (!this->streaming_.load() || this->packetizer_ == nullptr)
     return;
+  this->feed_reference_();
   const auto info = this->source_->get_audio_stream_info();
   const uint8_t channels = info.get_channels();
   uint8_t channel = this->channel_.load();
@@ -286,6 +421,12 @@ void RtpMic::dump_config() {
                 "  Idle timeout: %u s",
                 this->control_port_, this->payload_type_, this->packet_ms_,
                 (unsigned) (rtp_mic_core::SessionTable::IDLE_TIMEOUT_MS / 1000));
+#ifdef USE_RTP_MIC_REFERENCE
+  ESP_LOGCONFIG(TAG,
+                "  Echo reference: udp/%u when offered and answers play in the room\n"
+                "  Reference queue: %u ms",
+                this->ref_port_, (unsigned) this->ref_queue_ms_);
+#endif
 }
 
 }  // namespace esphome::rtp_mic
