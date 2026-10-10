@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 
 #include "rtp_core.h"
+#include "rtp_session.h"
 
 #include <atomic>
 #include <memory>
@@ -23,41 +24,56 @@ class RtpMic : public Component {
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_microphone_source(microphone::MicrophoneSource *source) { this->source_ = source; }
-  void set_channel(uint8_t channel) { this->channel_.store(channel); }
   void set_payload_type(uint8_t pt) { this->payload_type_ = pt; }
   void set_packet_ms(uint8_t ms) { this->packet_ms_ = ms; }
+  void set_control_port(uint16_t port) { this->control_port_ = port; }
+  void set_token(const std::string &token) { this->sessions_ = rtp_mic_core::SessionTable(token); }
 
-  // "host:port", or "" to clear. Resolved in loop(), never in the mic task.
-  void set_destination(const std::string &host_port);
-  const std::string &get_destination() const { return this->destination_; }
+  // The "RTP mic service" switch. Off refuses new sessions and drops the
+  // current one at once -- the local privacy switch for this mic.
+  void set_service_enabled(bool enabled);
+  bool is_service_enabled() const { return this->sessions_.enabled(); }
 
-  // Streaming needs both: switched on AND a resolvable destination.
-  void set_enabled(bool enabled);
-  bool is_enabled() const { return this->enabled_; }
   bool is_streaming() const { return this->streaming_.load(); }
-  uint8_t get_channel() const { return this->channel_.load(); }
+  // "10.1.8.174:46000 (asr)", or "" when nobody is listening.
+  std::string get_client() const;
   uint32_t get_packets_sent() const { return this->packets_sent_.load(); }
   uint32_t get_packets_dropped() const { return this->packets_dropped_.load(); }
 
  protected:
+  struct Conn {
+    int fd{-1};
+    uint32_t ip{0};
+    std::string ip_text;
+    std::string buf;
+  };
+
   void on_audio_(const std::vector<uint8_t> &data);
-  void update_state_();
-  bool resolve_();
+  void open_control_();
+  void accept_();
+  void serve_(Conn &c);
+  bool close_(Conn &c);
+  void apply_session_();
 
   microphone::MicrophoneSource *source_{nullptr};
-  std::atomic<uint8_t> channel_{0};
   uint8_t payload_type_{96};
   uint8_t packet_ms_{20};
+  uint16_t control_port_{6055};
+  uint32_t ssrc_{0};
 
-  std::string destination_;
-  bool destination_dirty_{false};
-  bool enabled_{false};
+  rtp_mic_core::SessionTable sessions_;
+  int listen_fd_{-1};
+  // One live session plus one more connection to refuse politely; a third is
+  // closed without a word. This is a mic on a LAN, not a server farm.
+  static constexpr size_t MAX_CONNS = 2;
+  Conn conns_[MAX_CONNS];
 
   int sock_{-1};
   std::mutex addr_lock_;
   struct sockaddr_in addr_ {};
   bool addr_valid_{false};
 
+  std::atomic<uint8_t> channel_{0};
   std::atomic<bool> streaming_{false};
   std::unique_ptr<rtp_mic_core::Decimator> decimator_;
   std::unique_ptr<rtp_mic_core::Packetizer> packetizer_;

@@ -5,9 +5,10 @@ server's echo canceller -- the only one that knows what every room is playing,
 Snapcast answers included -- never hears this mic. Sending the beam to PipeWire
 over RTP fixes that without changing how the device itself answers.
 
-The device does not know the server. Where to send is a runtime setting
-(`set_destination("10.1.8.174:46000")`), driven by the hardware manager
-through ordinary ESPHome entities, so no IP is ever compiled in.
+The device does not know the server. It runs a small control service
+(tcp/6055, see rtp_session.h): the hardware manager connects, asks for the
+stream, and the RTP goes back to the address the request came from for as
+long as that connection stays open. No IP is compiled in or typed in.
 
 It listens alongside micro_wake_word and voice_assistant through its own
 MicrophoneSource; the I2S driver counts listeners, so starting or stopping the
@@ -17,28 +18,18 @@ stream never starts or stops the mic under them.
 import esphome.codegen as cg
 from esphome.components import microphone
 import esphome.config_validation as cv
-from esphome.const import CONF_CHANNEL, CONF_ID, CONF_MICROPHONE
+from esphome.const import CONF_ID, CONF_MICROPHONE
 
 DEPENDENCIES = ["microphone", "network"]
 CODEOWNERS = []
 
-CONF_DESTINATION = "destination"
+CONF_CONTROL_PORT = "control_port"
+CONF_TOKEN = "token"
 CONF_PAYLOAD_TYPE = "payload_type"
 CONF_PACKET_MS = "packet_ms"
 
 rtp_mic_ns = cg.esphome_ns.namespace("rtp_mic")
 RtpMic = rtp_mic_ns.class_("RtpMic", cg.Component)
-
-
-def _validate_destination(value):
-    value = cv.string_strict(value)
-    if value == "":
-        return value
-    host, sep, port = value.rpartition(":")
-    if not sep or not host:
-        raise cv.Invalid("destination must be host:port, e.g. 10.1.8.174:46000")
-    cv.port(int(port))
-    return value
 
 
 CONFIG_SCHEMA = cv.Schema(
@@ -52,9 +43,11 @@ CONFIG_SCHEMA = cv.Schema(
             min_channels=1,
             max_channels=2,
         ),
-        # Index into the source's channels list above, not the raw I2S slot.
-        cv.Optional(CONF_CHANNEL, default=0): cv.int_range(0, 1),
-        cv.Optional(CONF_DESTINATION, default=""): _validate_destination,
+        # Where the manager connects to ask for the stream. 6053 is the native
+        # API and 6054 is commonly taken by voice satellites, hence 6055.
+        cv.Optional(CONF_CONTROL_PORT, default=6055): cv.port,
+        # Empty = any host on the LAN may ask (see the package for the tradeoff).
+        cv.Optional(CONF_TOKEN, default=""): cv.All(cv.string_strict, cv.Length(max=64)),
         cv.Optional(CONF_PAYLOAD_TYPE, default=96): cv.int_range(96, 127),
         # 20 ms is the RTP audio norm and what PipeWire's receiver expects to
         # size its jitter buffer around; shorter wastes Wi-Fi airtime on headers.
@@ -78,8 +71,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     mic_source = await microphone.microphone_source_to_code(config[CONF_MICROPHONE])
     cg.add(var.set_microphone_source(mic_source))
-    cg.add(var.set_channel(config[CONF_CHANNEL]))
     cg.add(var.set_payload_type(config[CONF_PAYLOAD_TYPE]))
     cg.add(var.set_packet_ms(config[CONF_PACKET_MS]))
-    if config[CONF_DESTINATION]:
-        cg.add(var.set_destination(config[CONF_DESTINATION]))
+    cg.add(var.set_control_port(config[CONF_CONTROL_PORT]))
+    if config[CONF_TOKEN]:
+        cg.add(var.set_token(config[CONF_TOKEN]))

@@ -11,22 +11,35 @@
 # the room plays -- every zone's mix -- so with the mic there too, PipeWire's
 # echo canceller can do the job. Nothing about how the device answers changes.
 #
-# THE DEVICE DOES NOT KNOW THE SERVER. "RTP mic destination" (host:port) and
-# "RTP mic stream" are set at runtime by the hardware manager over the
-# encrypted native API (or by hand in Home Assistant). No IP is compiled in,
-# and the settings survive reboots.
+# A SERVICE, NOT A SETTING. The device never knows the server. It listens on
+# tcp/6055; the hardware manager ("Add network mic", by IP or from the mDNS
+# record below) connects and asks for the stream, and the RTP goes back to the
+# address that asked, for as long as that connection stays open and keeps
+# talking (30 s idle timeout). Nothing to type on the device, no server IP in
+# this file, and the manager needs no ESPHome API key. One server at a time:
+# a second one is refused and told who holds the mic.
+#
+# TOKEN. Set `rtp_mic_token` in the device's own substitutions to require
+# `token=<it>` on every request. Empty (the default) means anyone on the LAN
+# who can reach tcp/6055 can listen to this room -- the same trust the house
+# already gives to its other unauthenticated LAN audio (snapcast, RTP). Set a
+# token if the LAN carries guests or untrusted devices; it is sent in clear
+# text, so it keeps out the curious, not someone sniffing the network.
 #
 # WAKE WORD. The device's own micro_wake_word is untouched and keeps working
-# whether or not the stream is on. A server assistant fed from this stream is
-# the other option; running both is allowed and is the manager's choice.
+# whether or not anyone is streaming. A server assistant fed from this stream
+# is the other option; running both is allowed and is the manager's choice.
 #
 # BEAM. formatBCE's int-host 48k firmware puts the XVF3800's outputs on two
 # I2S slots, read here as two channels. This config already gives
 # voice_assistant (speech-to-text) channel 0 and micro_wake_word channel 1,
 # matching Seeed's table for its 48 kHz Home Assistant build: channel 0 = ASR
-# beam, channel 1 = wake-word output. ASR is the default because the server
-# runs its own processing; it is a select so it can be changed without a
-# reflash if a measurement says otherwise.
+# beam, channel 1 = wake-word output. The manager picks the beam per session
+# (`beam=asr|wakeword`), so a wrong guess here is a manager setting, not a
+# reflash.
+
+substitutions:
+  rtp_mic_token: ""
 
 rtp_mic:
   id: rtp
@@ -34,72 +47,54 @@ rtp_mic:
     microphone: i2s_mics
     channels: [0, 1]
     bits_per_sample: 32
-  channel: 0
+  control_port: 6055
+  token: ${rtp_mic_token}
 
-# Lets the manager find RTP-capable satellites without a list of IPs. The
-# port is the native API, which is how the destination is set.
+# Lets the manager list RTP-capable satellites without anyone typing an IP.
 mdns:
   services:
     - service: "_ctrlable-rtp-mic"
       protocol: "_tcp"
-      port: 6053
+      port: 6055
       txt:
         format: L16/16000/1
-        control: esphome-api
+        control: tcp-line/1
         beams: asr,wakeword
 
-text:
-  - platform: template
-    name: "RTP mic destination"
-    id: rtp_destination
-    icon: mdi:ip-network
-    entity_category: config
-    mode: text
-    max_length: 64
-    optimistic: true
-    restore_value: true
-    initial_value: ""
-    on_value:
-      - lambda: id(rtp).set_destination(x);
-
 switch:
+  # ON by default, and why that is safe: in the pull model nothing streams
+  # until a server asks, so "on" only means "a server MAY ask". Off is the
+  # local privacy switch -- it refuses new sessions and hangs up on the current
+  # one at once, without touching the device's own wake word.
   - platform: template
-    name: "RTP mic stream"
-    id: rtp_stream
+    name: "RTP mic service"
+    id: rtp_service
     icon: mdi:microphone-message
     entity_category: config
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
-      - lambda: id(rtp).set_enabled(true);
+      - lambda: id(rtp).set_service_enabled(true);
     on_turn_off:
-      - lambda: id(rtp).set_enabled(false);
+      - lambda: id(rtp).set_service_enabled(false);
 
-select:
+text_sensor:
+  # Who is listening right now: "10.1.8.174:46000 (asr)", or empty. The answer
+  # to "is this room's mic being streamed, and to where?" on the device itself.
   - platform: template
-    name: "RTP mic beam"
-    id: rtp_beam
-    icon: mdi:microphone-settings
-    entity_category: config
-    optimistic: true
-    restore_value: true
-    initial_option: ASR
-    options:
-      - ASR
-      - Wake word
-    on_value:
-      - lambda: id(rtp).set_channel(i);
+    name: "RTP mic client"
+    id: rtp_client
+    icon: mdi:ip-network
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: return id(rtp).get_client();
 
 esphome:
   on_boot:
-    # Restored entity states do not all replay their triggers at boot, so the
-    # component is told explicitly once everything is up.
+    # A restored switch does not always replay its trigger at boot.
     - priority: -100
       then:
-        - lambda: |-
-            id(rtp).set_channel(id(rtp_beam).active_index().value_or(0));
-            id(rtp).set_destination(id(rtp_destination).state);
-            id(rtp).set_enabled(id(rtp_stream).state);
+        - lambda: id(rtp).set_service_enabled(id(rtp_service).state);
 
 external_components:
   - source:

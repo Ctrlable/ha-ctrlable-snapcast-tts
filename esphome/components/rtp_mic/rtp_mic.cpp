@@ -1,11 +1,12 @@
 #include "rtp_mic.h"
 
+#include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <fcntl.h>
-#include <lwip/netdb.h>
 
 namespace esphome::rtp_mic {
 
@@ -14,6 +15,13 @@ static const uint32_t OUT_RATE = 16000;
 // One status line a minute while streaming: enough to see loss on Wi-Fi
 // without drowning the log the voice pipeline is debugged from.
 static const uint32_t REPORT_INTERVAL_MS = 60000;
+// A request line is ~60 bytes. Anything this long is not the manager.
+static const size_t MAX_LINE = 256;
+
+static void set_nonblocking(int fd) {
+  const int flags = lwip_fcntl(fd, F_GETFL, 0);
+  lwip_fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
 
 void RtpMic::setup() {
   this->sock_ = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -24,8 +32,7 @@ void RtpMic::setup() {
   }
   // Non-blocking: the send happens on the mic task, and a stalled Wi-Fi queue
   // must cost a dropped packet, never a stalled wake word.
-  const int flags = lwip_fcntl(this->sock_, F_GETFL, 0);
-  lwip_fcntl(this->sock_, F_SETFL, flags | O_NONBLOCK);
+  set_nonblocking(this->sock_);
 
   // Built once, here, and only reset afterwards: the mic task may be inside
   // on_audio_() at the moment loop() stops or restarts the stream.
@@ -35,74 +42,175 @@ void RtpMic::setup() {
     this->mark_failed();
     return;
   }
+  this->ssrc_ = random_uint32();
   this->decimator_ = make_unique<rtp_mic_core::Decimator>(in_rate / OUT_RATE);
   this->packetizer_ =
-      make_unique<rtp_mic_core::Packetizer>(this->payload_type_, random_uint32(), OUT_RATE * this->packet_ms_ / 1000);
+      make_unique<rtp_mic_core::Packetizer>(this->payload_type_, this->ssrc_, OUT_RATE * this->packet_ms_ / 1000);
 
   this->source_->add_data_callback([this](const std::vector<uint8_t> &data) { this->on_audio_(data); });
-  this->destination_dirty_ = !this->destination_.empty();
+  this->open_control_();
 }
 
-void RtpMic::set_destination(const std::string &host_port) {
-  if (host_port == this->destination_)
+void RtpMic::open_control_() {
+  this->listen_fd_ = lwip_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (this->listen_fd_ < 0) {
+    ESP_LOGE(TAG, "control socket() failed: %d", errno);
+    this->mark_failed();
     return;
-  this->destination_ = host_port;
-  this->destination_dirty_ = true;
-}
-
-void RtpMic::set_enabled(bool enabled) {
-  if (enabled == this->enabled_)
+  }
+  int one = 1;
+  lwip_setsockopt(this->listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(this->control_port_);
+  if (lwip_bind(this->listen_fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0 ||
+      lwip_listen(this->listen_fd_, 2) != 0) {
+    ESP_LOGE(TAG, "cannot listen on tcp/%u: %d", this->control_port_, errno);
+    lwip_close(this->listen_fd_);
+    this->listen_fd_ = -1;
+    this->mark_failed();
     return;
-  this->enabled_ = enabled;
-  this->update_state_();
+  }
+  // Polled from loop(): no task of its own, so it can never race the mic task
+  // for anything but the address, which is behind addr_lock_.
+  set_nonblocking(this->listen_fd_);
 }
 
-bool RtpMic::resolve_() {
-  const auto colon = this->destination_.rfind(':');
-  if (this->destination_.empty() || colon == std::string::npos) {
-    std::lock_guard<std::mutex> guard(this->addr_lock_);
-    this->addr_valid_ = false;
-    return false;
+void RtpMic::set_service_enabled(bool enabled) {
+  if (enabled == this->sessions_.enabled())
+    return;
+  if (enabled) {
+    this->sessions_.set_enabled(true);
+    ESP_LOGI(TAG, "service on: accepting sessions on tcp/%u", this->control_port_);
+    return;
   }
-  const std::string host = this->destination_.substr(0, colon);
-  const int port = atoi(this->destination_.c_str() + colon + 1);
-
-  struct addrinfo hints {};
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_DGRAM;
-  struct addrinfo *res = nullptr;
-  // An IP literal resolves without a network round trip; a name blocks loop()
-  // for one DNS lookup, once per change -- the manager sends IPs.
-  if (lwip_getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
-    ESP_LOGW(TAG, "cannot resolve %s", host.c_str());
-    std::lock_guard<std::mutex> guard(this->addr_lock_);
-    this->addr_valid_ = false;
-    return false;
-  }
-  std::lock_guard<std::mutex> guard(this->addr_lock_);
-  memcpy(&this->addr_, res->ai_addr, sizeof(this->addr_));
-  this->addr_.sin_port = htons(port);
-  this->addr_valid_ = true;
-  lwip_freeaddrinfo(res);
-  return true;
+  this->sessions_.disable();
+  // Hang up on everyone: an off switch that left a stream running until the
+  // manager noticed would not be an off switch.
+  for (auto &c : this->conns_)
+    this->close_(c);
+  this->apply_session_();
+  ESP_LOGI(TAG, "service off: no sessions");
 }
 
-void RtpMic::update_state_() {
-  bool have_addr;
+std::string RtpMic::get_client() const {
+  const auto &s = this->sessions_.current();
+  if (!s.active)
+    return "";
+  return s.ip_text + ":" + std::to_string(s.port) + " (" + rtp_mic_core::beam_name(s.beam) + ")";
+}
+
+void RtpMic::accept_() {
+  struct sockaddr_in peer {};
+  socklen_t len = sizeof(peer);
+  const int fd = lwip_accept(this->listen_fd_, reinterpret_cast<struct sockaddr *>(&peer), &len);
+  if (fd < 0)
+    return;
+  Conn *slot = nullptr;
+  for (auto &c : this->conns_) {
+    if (c.fd < 0) {
+      slot = &c;
+      break;
+    }
+  }
+  if (slot == nullptr) {
+    lwip_close(fd);
+    return;
+  }
+  set_nonblocking(fd);
+  slot->fd = fd;
+  slot->ip = peer.sin_addr.s_addr;
+  char text[16];
+  const uint32_t h = ntohl(peer.sin_addr.s_addr);
+  snprintf(text, sizeof(text), "%u.%u.%u.%u", (unsigned) (h >> 24), (unsigned) ((h >> 16) & 0xff),
+           (unsigned) ((h >> 8) & 0xff), (unsigned) (h & 0xff));
+  slot->ip_text = text;
+  slot->buf.clear();
+  ESP_LOGD(TAG, "control connection from %s", text);
+}
+
+// True when this connection owned the session, i.e. the stream must stop.
+bool RtpMic::close_(Conn &c) {
+  if (c.fd < 0)
+    return false;
+  lwip_close(c.fd);
+  const bool dropped = this->sessions_.on_disconnect(c.fd);
+  if (dropped)
+    ESP_LOGI(TAG, "%s hung up; stream stopped", c.ip_text.c_str());
+  c.fd = -1;
+  c.buf.clear();
+  return dropped;
+}
+
+void RtpMic::serve_(Conn &c) {
+  char chunk[64];
+  bool changed = false;
+  for (;;) {
+    const int n = lwip_recv(c.fd, chunk, sizeof(chunk), 0);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+      if (this->close_(c) || changed)
+        this->apply_session_();
+      return;
+    }
+    if (n < 0)
+      break;
+    c.buf.append(chunk, n);
+    if (c.buf.size() > MAX_LINE && c.buf.find('\n') == std::string::npos) {
+      if (this->close_(c) || changed)
+        this->apply_session_();
+      return;
+    }
+    size_t nl;
+    while ((nl = c.buf.find('\n')) != std::string::npos) {
+      const std::string line = c.buf.substr(0, nl);
+      c.buf.erase(0, nl + 1);
+      const auto reply =
+          this->sessions_.handle_line(c.fd, c.ip, c.ip_text, line, millis(), this->ssrc_, this->payload_type_);
+      const std::string out = reply.line + "\n";
+      lwip_send(c.fd, out.data(), out.size(), 0);
+      if (reply.line.rfind("ERR", 0) == 0)
+        ESP_LOGW(TAG, "%s: '%s' -> %s", c.ip_text.c_str(), line.c_str(), reply.line.c_str());
+      changed |= reply.changed;
+      if (reply.close) {
+        if (this->close_(c) || changed)
+          this->apply_session_();
+        return;
+      }
+    }
+  }
+  if (changed)
+    this->apply_session_();
+}
+
+// Points the UDP stream at whatever the session table now says.
+void RtpMic::apply_session_() {
+  const auto &s = this->sessions_.current();
+  const bool want = s.active && !this->is_failed();
+  if (want) {
+    {
+      std::lock_guard<std::mutex> guard(this->addr_lock_);
+      this->addr_ = {};
+      this->addr_.sin_family = AF_INET;
+      this->addr_.sin_addr.s_addr = s.ip;
+      this->addr_.sin_port = htons(s.port);
+      this->addr_valid_ = true;
+    }
+    this->channel_.store(static_cast<uint8_t>(s.beam));
+    // A new target restarts the stream so the receiver sees the marker.
+    this->restart_packetizer_.store(true);
+    if (!this->streaming_.load()) {
+      this->streaming_.store(true);
+      this->source_->start();
+    }
+    ESP_LOGI(TAG, "streaming %s beam to %s:%u", rtp_mic_core::beam_name(s.beam), s.ip_text.c_str(), s.port);
+    return;
+  }
   {
     std::lock_guard<std::mutex> guard(this->addr_lock_);
-    have_addr = this->addr_valid_;
+    this->addr_valid_ = false;
   }
-  const bool want = this->enabled_ && have_addr && !this->is_failed();
-  if (want == this->streaming_.load())
-    return;
-
-  if (want) {
-    this->restart_packetizer_.store(true);
-    this->streaming_.store(true);
-    this->source_->start();
-    ESP_LOGI(TAG, "streaming channel %u to %s", this->channel_.load(), this->destination_.c_str());
-  } else {
+  if (this->streaming_.load()) {
     this->streaming_.store(false);
     this->source_->stop();
     ESP_LOGI(TAG, "stopped (sent %u, dropped %u)", (unsigned) this->packets_sent_.load(),
@@ -111,18 +219,22 @@ void RtpMic::update_state_() {
 }
 
 void RtpMic::loop() {
-  if (this->destination_dirty_) {
-    this->destination_dirty_ = false;
-    this->resolve_();
-    // A new destination restarts the stream so the receiver sees the marker.
-    this->restart_packetizer_.store(true);
-    this->update_state_();
+  if (this->listen_fd_ < 0)
+    return;
+  this->accept_();
+  for (auto &c : this->conns_) {
+    if (c.fd >= 0)
+      this->serve_(c);
+  }
+  if (this->sessions_.tick(millis())) {
+    ESP_LOGW(TAG, "no keepalive for %u s; stream stopped", (unsigned) (rtp_mic_core::SessionTable::IDLE_TIMEOUT_MS / 1000));
+    this->apply_session_();
   }
   if (this->streaming_.load()) {
     const uint32_t now = millis();
     if (now - this->last_report_ms_ > REPORT_INTERVAL_MS) {
       this->last_report_ms_ = now;
-      ESP_LOGD(TAG, "to %s: sent %u, dropped %u", this->destination_.c_str(), (unsigned) this->packets_sent_.load(),
+      ESP_LOGD(TAG, "to %s: sent %u, dropped %u", this->get_client().c_str(), (unsigned) this->packets_sent_.load(),
                (unsigned) this->packets_dropped_.load());
     }
   }
@@ -168,12 +280,12 @@ void RtpMic::on_audio_(const std::vector<uint8_t> &data) {
 void RtpMic::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "RTP mic:\n"
-                "  Channel: %u\n"
+                "  Control: tcp/%u (the manager connects here; the stream goes back to it)\n"
                 "  Payload type: %u (L16/16000/1)\n"
                 "  Packet: %u ms\n"
-                "  Destination: %s",
-                this->channel_.load(), this->payload_type_, this->packet_ms_,
-                this->destination_.empty() ? "(none; set at runtime)" : this->destination_.c_str());
+                "  Idle timeout: %u s",
+                this->control_port_, this->payload_type_, this->packet_ms_,
+                (unsigned) (rtp_mic_core::SessionTable::IDLE_TIMEOUT_MS / 1000));
 }
 
 }  // namespace esphome::rtp_mic
