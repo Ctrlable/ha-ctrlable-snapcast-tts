@@ -1,0 +1,109 @@
+# --- Ctrlable: stream the mic to the server over RTP ------------------------
+#
+# Optional package. Include it from a satellite that has `i2s_mics`:
+#
+#   packages:
+#     rtp_mic: !include packages/ctrlable_rtp_mic.yaml
+#
+# WHY. This device answers through the Snapcast TTS add-on: the reply plays
+# from the room's speakers, which this XVF3800 never hears as a reference, so
+# its own echo canceller has nothing to subtract. The server does know what
+# the room plays -- every zone's mix -- so with the mic there too, PipeWire's
+# echo canceller can do the job. Nothing about how the device answers changes.
+#
+# THE DEVICE DOES NOT KNOW THE SERVER. "RTP mic destination" (host:port) and
+# "RTP mic stream" are set at runtime by the hardware manager over the
+# encrypted native API (or by hand in Home Assistant). No IP is compiled in,
+# and the settings survive reboots.
+#
+# WAKE WORD. The device's own micro_wake_word is untouched and keeps working
+# whether or not the stream is on. A server assistant fed from this stream is
+# the other option; running both is allowed and is the manager's choice.
+#
+# BEAM. formatBCE's int-host 48k firmware puts the XVF3800's outputs on two
+# I2S slots, read here as two channels. This config already gives
+# voice_assistant (speech-to-text) channel 0 and micro_wake_word channel 1,
+# matching Seeed's table for its 48 kHz Home Assistant build: channel 0 = ASR
+# beam, channel 1 = wake-word output. ASR is the default because the server
+# runs its own processing; it is a select so it can be changed without a
+# reflash if a measurement says otherwise.
+
+rtp_mic:
+  id: rtp
+  microphone:
+    microphone: i2s_mics
+    channels: [0, 1]
+    bits_per_sample: 32
+  channel: 0
+
+# Lets the manager find RTP-capable satellites without a list of IPs. The
+# port is the native API, which is how the destination is set.
+mdns:
+  services:
+    - service: "_ctrlable-rtp-mic"
+      protocol: "_tcp"
+      port: 6053
+      txt:
+        format: L16/16000/1
+        control: esphome-api
+        beams: asr,wakeword
+
+text:
+  - platform: template
+    name: "RTP mic destination"
+    id: rtp_destination
+    icon: mdi:ip-network
+    entity_category: config
+    mode: text
+    max_length: 64
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    on_value:
+      - lambda: id(rtp).set_destination(x);
+
+switch:
+  - platform: template
+    name: "RTP mic stream"
+    id: rtp_stream
+    icon: mdi:microphone-message
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(rtp).set_enabled(true);
+    on_turn_off:
+      - lambda: id(rtp).set_enabled(false);
+
+select:
+  - platform: template
+    name: "RTP mic beam"
+    id: rtp_beam
+    icon: mdi:microphone-settings
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: ASR
+    options:
+      - ASR
+      - Wake word
+    on_value:
+      - lambda: id(rtp).set_channel(i);
+
+esphome:
+  on_boot:
+    # Restored entity states do not all replay their triggers at boot, so the
+    # component is told explicitly once everything is up.
+    - priority: -100
+      then:
+        - lambda: |-
+            id(rtp).set_channel(id(rtp_beam).active_index().value_or(0));
+            id(rtp).set_destination(id(rtp_destination).state);
+            id(rtp).set_enabled(id(rtp_stream).state);
+
+external_components:
+  - source:
+      type: local
+      # Resolved from the MAIN config file's directory, not this package's.
+      path: components
+    components: [rtp_mic]

@@ -83,6 +83,12 @@ substitutions:
   # lands during listening -- matching the other two satellites.
   chime_lead_in: 250ms
 
+# Mic over RTP to the server, for server-side echo cancelling and an optional
+# server wake word. Off until the hardware manager sets a destination and turns
+# it on; see the package for why.
+packages:
+  rtp_mic: !include packages/ctrlable_rtp_mic.yaml
+
 esphome:
   name: respeaker-xvf3800
   friendly_name: reSpeaker XVF3800 Assistant
