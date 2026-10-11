@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <lwip/sockets.h>
 
 namespace esphome::rtp_mic {
@@ -77,6 +79,9 @@ class RtpMic : public Component {
   void apply_session_();
   void apply_reference_();
   void feed_reference_();
+#ifdef USE_RTP_MIC_REFERENCE
+  static void ref_task_(void *arg);
+#endif
 
   microphone::MicrophoneSource *source_{nullptr};
   uint8_t payload_type_{96};
@@ -107,9 +112,13 @@ class RtpMic : public Component {
   std::atomic<uint32_t> packets_sent_{0};
   std::atomic<uint32_t> packets_dropped_{0};
   uint32_t last_report_ms_{0};
+  std::atomic<uint32_t> mic_stack_free_{0};
+  bool stack_reported_{false};
 
   // Echo reference. Touched by the main loop only to open/close/re-anchor,
-  // under ref_lock_; everything per-packet happens on the mic task.
+  // under ref_lock_; everything per-packet happens on ref_task_, which the
+  // mic task only wakes (never on the mic task itself: its 4 KB stack also
+  // carries the wake word, and the reference work overflowed it).
   bool answers_local_{false};
   std::atomic<bool> ref_active_{false};
 #ifdef USE_RTP_MIC_REFERENCE
@@ -127,6 +136,9 @@ class RtpMic : public Component {
   std::vector<int16_t> ref16_;
   std::vector<int16_t> ref48_;
   uint32_t ref_foreign_{0};
+  // Created the first time a reference starts; a device that answers locally
+  // never pays for it.
+  TaskHandle_t ref_task_handle_{nullptr};
 #endif
 };
 

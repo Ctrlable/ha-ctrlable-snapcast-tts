@@ -17,9 +17,12 @@ static const uint32_t OUT_RATE = 16000;
 static const uint32_t REPORT_INTERVAL_MS = 60000;
 // A request line is ~60 bytes. Anything this long is not the manager.
 static const size_t MAX_LINE = 256;
-// Most reference samples pushed per mic callback (30 ms): bounds the work done
-// on the mic task, and the catch-up after a stall.
+// Most reference samples pushed per wake-up (30 ms): bounds the work per
+// wake-up, and the catch-up after a stall.
 static const size_t REF_CHUNK = 480;
+// Below the mic task (23) and Wi-Fi, above the mixer (10) that drains it.
+static const UBaseType_t REF_TASK_PRIORITY = 12;
+static const uint32_t REF_TASK_STACK = 4096;
 
 static void set_nonblocking(int fd) {
   const int flags = lwip_fcntl(fd, F_GETFL, 0);
@@ -155,6 +158,13 @@ void RtpMic::apply_reference_() {
     this->ref_jb_->set_delay(16u * s.ref_delay_ms);
     this->ref_up_.reset();
     this->ref_foreign_ = 0;
+    if (this->ref_task_handle_ == nullptr &&
+        xTaskCreate(RtpMic::ref_task_, "rtp_ref", REF_TASK_STACK, this, REF_TASK_PRIORITY,
+                    &this->ref_task_handle_) != pdPASS) {
+      this->ref_task_handle_ = nullptr;
+      ESP_LOGE(TAG, "cannot start the echo reference task");
+      return;
+    }
     if (!this->ref_active_.load()) {
       // Mono 16-bit at the mixer's rate; the mixer widens it to the I2S format.
       // Its volume is the shared output's, i.e. the DAC: muted at 0, while the
@@ -184,9 +194,21 @@ void RtpMic::apply_reference_() {
 #endif
 }
 
-// Mic task, once per mic read (~5 ms). The mic and the speaker share the
-// XVF3800's I2S clock, so this is the one place that can pace the reference
-// to what the XVF actually consumes -- no task, no timer of its own.
+#ifdef USE_RTP_MIC_REFERENCE
+// Woken by the mic task once per mic read (~5 ms). The mic and the speaker
+// share the XVF3800's I2S clock, so that wake-up paces the reference to what
+// the XVF actually consumes -- no timer of its own. Blocks forever while no
+// reference runs.
+void RtpMic::ref_task_(void *arg) {
+  auto *self = static_cast<RtpMic *>(arg);
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    self->feed_reference_();
+  }
+}
+#endif
+
+// Reference task only.
 void RtpMic::feed_reference_() {
 #ifdef USE_RTP_MIC_REFERENCE
   if (!this->ref_active_.load())
@@ -323,6 +345,7 @@ void RtpMic::apply_session_() {
     // A new target restarts the stream so the receiver sees the marker.
     this->restart_packetizer_.store(true);
     if (!this->streaming_.load()) {
+      this->stack_reported_ = false;
       this->streaming_.store(true);
       this->source_->start();
     }
@@ -361,6 +384,18 @@ void RtpMic::loop() {
       this->last_report_ms_ = now;
       ESP_LOGD(TAG, "to %s: sent %u, dropped %u", this->get_client().c_str(), (unsigned) this->packets_sent_.load(),
                (unsigned) this->packets_dropped_.load());
+      // Stack headroom once per stream at INFO (the 2026-10-10 overflow was the
+      // mic task's), and a warning whenever it runs low.
+      const uint32_t mic_free = this->mic_stack_free_.load();
+      uint32_t ref_free = 0;
+#ifdef USE_RTP_MIC_REFERENCE
+      if (this->ref_task_handle_ != nullptr)
+        ref_free = uxTaskGetStackHighWaterMark(this->ref_task_handle_);
+#endif
+      if (!this->stack_reported_ || (mic_free > 0 && mic_free < 512) || (ref_free > 0 && ref_free < 512)) {
+        this->stack_reported_ = true;
+        ESP_LOGI(TAG, "stack free: mic task %u, reference task %u bytes", (unsigned) mic_free, (unsigned) ref_free);
+      }
 #ifdef USE_RTP_MIC_REFERENCE
       // Read without the lock: counters for a log line, a torn read is harmless.
       if (this->ref_active_.load()) {
@@ -378,7 +413,14 @@ void RtpMic::loop() {
 void RtpMic::on_audio_(const std::vector<uint8_t> &data) {
   if (!this->streaming_.load() || this->packetizer_ == nullptr)
     return;
-  this->feed_reference_();
+#ifdef USE_RTP_MIC_REFERENCE
+  if (this->ref_active_.load() && this->ref_task_handle_ != nullptr)
+    xTaskNotifyGive(this->ref_task_handle_);
+#endif
+  // Sampled, not scanned every read: the crash this watches for is slow to come.
+  static uint32_t reads = 0;
+  if (++reads % 1000 == 1)
+    this->mic_stack_free_.store(uxTaskGetStackHighWaterMark(nullptr));
   const auto info = this->source_->get_audio_stream_info();
   const uint8_t channels = info.get_channels();
   uint8_t channel = this->channel_.load();
