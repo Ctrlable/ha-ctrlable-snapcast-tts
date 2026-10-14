@@ -48,6 +48,9 @@ substitutions:
   stop_guard_base_s: '1.5'
   stop_guard_rate: '0.15'
   chime_lead_in: 250ms
+  # RTP mic (Mic only mode). Empty = any host on the LAN may ask; see
+  # packages/ctrlable_rtp_mic.yaml for the tradeoff.
+  rtp_mic_token: ""
 
   # Audio files
   wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
@@ -89,15 +92,28 @@ esphome:
   name_add_mac_suffix: false
   min_version: 2026.1.0
   on_boot:
-    priority: 600
-    then:
-      - delay: 30s
-      - if:
-          condition:
-            lambda: return id(init_in_progress);
-          then:
-            - lambda: id(init_in_progress) = false;
-            
+    - priority: 600
+      then:
+        - delay: 30s
+        - if:
+            condition:
+              lambda: return id(init_in_progress);
+            then:
+              - lambda: id(init_in_progress) = false;
+    - priority: -200
+      then:
+        - script.execute: apply_device_mode
+
+# --- Ctrlable: Device mode (see the select) ---
+# gate_speaker: the media player's speaker, which either plays through
+# i2s_speaker (Regular) or swallows the local copy (Snapcast, Mic only).
+# rtp_mic: the mic over RTP to the server, served only in Mic only.
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [gate_speaker, rtp_mic]
+
 esp32:
   variant: esp32s3
   flash_size: 8MB
@@ -201,38 +217,41 @@ speaker:
     bits_per_sample: 16bit
     channel: left
     audio_dac: es8311_dac
+  # --- Ctrlable: the speaker the media player actually plays to ---
+  #
+  # The mic and i2s_speaker share ONE I2S bus, and ESPHome lets only one of
+  # them hold it. Snapcast mode keeps the wake word listening through the
+  # answer (so "stop" can interrupt), so the local copy of the answer could
+  # never start: `Parent bus is busy` once a second, the announcement never
+  # finished, and the satellite sat wedged from 2026-10-12 22:01 until a
+  # reflash -- one wake in the 16 days after the barge-in build (f278efc),
+  # against several a week before it. The CoreS3 never hit this only because
+  # its silent sink is a second bus.
+  #
+  # Regular: passthrough, the answer plays here and the mic pauses for it (the
+  # stock behaviour, no barge-in). Snapcast / Mic only: the audio is taken at
+  # real-time pace and dropped, so the bus is never touched and the
+  # announcement still lasts as long as the answer. Set by apply_device_mode.
+  - platform: gate_speaker
+    id: answer_speaker
+    output: i2s_speaker
 
 media_player:
   - platform: speaker
     name: None
     id: speaker_media_player
-    # --- Ctrlable Snapcast routing: this is how the device goes silent ------
+    # The slider is the device's loudness in Regular mode. In the other modes
+    # answer_speaker swallows the audio, so the device is silent whatever the
+    # slider says, and announce_and_wait forwards the RAW slider to the add-on
+    # as the snapclient volume ("how loud in the room").
     #
-    # 0.0/0.0 is not a mistake. SpeakerMediaPlayer::set_volume_() remaps the
-    # slider into [volume_min, volume_max] before handing it to the speaker:
-    #
-    #     bounded = remap(volume, 0..1, volume_min_, volume_max_)
-    #     announcement_speaker_->set_volume(bounded)
-    #     if (publish) this->volume = volume;      // <- RAW slider is published
-    #
-    # so the DAC always receives 0.0 (es8311 writes REG32=0, about -95.5dB)
-    # while `id(speaker_media_player).volume` still reports where the user put
-    # the slider. announce_and_wait forwards that raw value to the add-on as the
-    # snapclient volume -- so the HA slider still means something, it just means
-    # "how loud in the room" instead of "how loud on this little speaker".
-    #
-    # Worth knowing: I2SAudioSpeakerBase::set_volume() only calls
-    # audio_dac_->set_mute_off() when volume > 0.0, so a 0.0 bounded volume
-    # never lifts a mute either. Two independent reasons it stays quiet.
-    #
-    # The CoreS3 needed a whole second I2S bus wired to unused pins for this,
-    # because its aw88298's mute and volume are no-ops. The es8311 here is
-    # ESPHome's own component and actually writes the register, so this device
-    # needs no spare GPIOs at all.
-    volume_min: 0.0
-    volume_max: 0.0
+    # This used to be volume_min/max 0.0/0.0, the trick that kept the DAC at
+    # -95.5 dB while publishing the raw slider. It kept the device silent but
+    # still drove the bus, which is exactly what wedged it (see answer_speaker).
+    volume_min: 0.4
+    volume_max: 0.85
     announcement_pipeline:
-      speaker: i2s_speaker
+      speaker: answer_speaker
       format: FLAC
       sample_rate: 48000
       num_channels: 1  # Atom Echo S3R only has one output channel
@@ -290,23 +309,24 @@ micro_wake_word:
   microphone: i2s_mic
   stop_after_detection: false
   models:
-    # OUR OWN MODEL, served from this repo's raw URL (esphome/models/ in git).
-    # Trained 2026-08-10 in ~/Projects/ctrlable-wakewords; ~96% recall, cutoff
-    # 0.94 measured rather than guessed. Replaces okay_nabu -- micro_wake_word
-    # runs every model on every frame, so this keeps the CPU cost flat. Restore
-    # the ${okay_nabu_model_file} line to get it back.
-    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/hey_maya.json
+    # OUR FAR-FIELD RETRAIN (2026-10-11, ctrlable-wakewords hey_maya_ff), local
+    # file in esphome/models/. Scored on 17 real far-field "Hey Maya"s recorded
+    # on beta: 15/17 at 0.90 with 0 false wakes (highest non-wake 0.87, TV),
+    # where the August model managed 8/17 and spiked falsely. Same model as
+    # the XVF3800.
+    - model: models/hey_maya_ff.json
       id: hey_maya
     # Trained 2026-08-11 at 30000 samples: 4.8% miss at ZERO false accepts/hour
     # on the quantized streaming model. The 2000-sample first attempt missed 11%
     # and was never shipped. Cutoff 0.98 rather than hey_maya's 0.94 because
-    # "okay" is a far commoner word in speech than "hey".
-    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/okay_maya.json
+    # "okay" is a far commoner word in speech than "hey". Pinned to a commit:
+    # a `main` URL is re-fetched on every compile.
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/69e35f58eeede8899d531d8c8148bdfadc99009c/esphome/models/okay_maya.json
       id: okay_maya
-    - model: hey_jarvis
-      id: hey_jarvis
-    - model: hey_mycroft
-      id: hey_mycroft
+    # hey_jarvis and hey_mycroft were dropped 2026-10-13: this unit's partition
+    # table predates the 8 MB layout (app slots ~1.75 MB) and the Device mode
+    # build ran 32 KB over. Nobody here used them; the select said Hey Maya.
+    # Re-flashing the partition table over USB would make room for them again.
     - model: ${stop_model_file}
       id: stop
       internal: true
@@ -386,26 +406,48 @@ micro_wake_word:
           # announce with an empty wake_word only matches a "*" mapping.
           - lambda: id(current_wake_word) = wake_word;
 
-          # The chime goes to the room, not to this box. Upstream played it locally
-          # and waited for it to finish before opening the mic; here the local
-          # speaker is silent, so that wait would be dead air.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.chime
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
-                chime: wake
-                volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
-
-          # Nothing of ours is playing, but a previous reply might still be draining.
-          - wait_until:
-              - and:
-                  - not:
+          - if:
+              condition:
+                lambda: return id(mode_index) == 0;
+              then:
+                # Regular: upstream's way. The chime plays HERE, which needs the
+                # bus, so play_sound stops the wake word first; the mic reopens
+                # once the chime is done.
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: !lambda return id(wake_word_triggered_sound);
+                - wait_until:
+                    condition:
                       media_player.is_announcing:
-                  - not:
-                      speaker.is_playing:
+                    timeout: 0.5s
+                - wait_until:
+                    - and:
+                        - not:
+                            media_player.is_announcing:
+                        - not:
+                            speaker.is_playing: answer_speaker
+              else:
+                # The chime goes to the room, not to this box. Upstream played it
+                # locally and waited for it to finish before opening the mic; here
+                # the local speaker is silent, so that wait would be dead air.
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.chime
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
+                      chime: wake
+                      volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
 
-          - delay: ${chime_lead_in}
+                # Nothing of ours is playing, but a previous reply might still be draining.
+                - wait_until:
+                    - and:
+                        - not:
+                            media_player.is_announcing:
+                        - not:
+                            speaker.is_playing: answer_speaker
+
+                - delay: ${chime_lead_in}
 
           - voice_assistant.start:
               wake_word: !lambda return wake_word;
@@ -435,13 +477,18 @@ voice_assistant:
     # --- Ctrlable Snapcast routing ---
     # ctrlable_processing.flac, the same sound the LVA zones make at
     # end-of-capture. Holds the zone ~1.5s; intent resolution measures 2-9s.
-    - homeassistant.service:
-        service: ctrlable_snapcast_tts.chime
-        data:
-          satellite_id: !lambda return App.get_name();
-          wake_word: !lambda return id(current_wake_word);
-          chime: thinking
-          volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+    # Regular mode has no room chime, as upstream.
+    - if:
+        condition:
+          lambda: return id(mode_index) != 0;
+        then:
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.chime
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
+                chime: thinking
+                volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
   on_tts_start:
     # --- Ctrlable ---
     # Predict when this answer will say "stop". Substring, not word-boundary:
@@ -544,16 +591,25 @@ voice_assistant:
           - lambda: return code == "cloud-auth-failed";
         then:
           # --- Ctrlable Snapcast routing ---
-          # Rare path, but this device is silent now, so the local file would
-          # give no signal at all that auth expired.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.chime
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
-                chime: error
-                volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
-          
+          # Rare path. Outside Regular this device is silent, so the local file
+          # would give no signal at all that auth expired.
+          - if:
+              condition:
+                lambda: return id(mode_index) == 0;
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: !lambda return id(error_cloud_expired);
+              else:
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.chime
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
+                      chime: error
+                      volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+
   on_client_connected:
     - lambda: id(init_in_progress) = false;
     - script.execute: start_wake_word
@@ -585,11 +641,11 @@ script:
               - not:
                   media_player.is_announcing:
               - not:
-                  speaker.is_playing:
+                  speaker.is_playing: answer_speaker
       - if:
           condition:
             - lambda: |-
-                return id(wake_word_engine_location).current_option() == "On device";
+                return id(wake_word_engine_location).current_option() == "On device" && id(mode_index) != 2;
           then:
             - lambda: id(va).set_use_wake_word(false);
             - micro_wake_word.start:
@@ -601,38 +657,49 @@ script:
   #
   # The call itself is fire-and-forget; the completion signal comes back the
   # other way, via ${snapcast_announcing_entity}.
+  #
+  # Regular mode sends nothing: the media player is already playing the answer
+  # here and the exchange ends the stock way. `responding` stays false, so
+  # on_announcement pauses the wake word for it (the bus is shared) and on_end
+  # releases the zone the wake word held. Same as the XVF3800's local mode.
   - id: announce_and_wait
     mode: restart
     then:
-      - lambda: id(responding) = true;
-      # The engine used to be stopped here -- "the answer plays through speakers
-      # near this mic and would otherwise re-trigger the wake word", which was
-      # true, and is why barge-in never worked on this device.
-      #
-      # It now stays listening with the stop model armed for the reply.
-      # on_wake_word_detected ignores every word except "stop" while `responding`
-      # is set, so a false wake can no longer truncate an answer, and "stop" can
-      # end one. The residual risk is an answer that itself contains the word --
-      # the same trade the Linux satellites make.
-      - script.execute: arm_stop_word
-      - homeassistant.service:
-          service: ctrlable_snapcast_tts.announce
-          data:
-            url: !lambda return id(last_tts_url);
-            satellite_id: !lambda return App.get_name();
-            wake_word: !lambda return id(current_wake_word);
-            # The slider is published raw even though the DAC gets 0.0, so this
-            # is the user's actual choice -- see the media_player comment.
-            volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
-      # Only fires if the completion signal never arrives: HA down, integration
-      # too old to expose the sensor, or the sensor wedged ON.
-      - delay: ${announce_max_wait}
       - if:
           condition:
-            lambda: return id(responding);
+            lambda: return id(mode_index) == 0;
           then:
-            - logger.log: "announce completion signal never arrived; releasing on backstop"
-            - script.execute: finish_response
+            - logger.log: "answer plays on this device (Regular mode); not sent to Snapcast"
+          else:
+            - lambda: id(responding) = true;
+            # The engine used to be stopped here -- "the answer plays through speakers
+            # near this mic and would otherwise re-trigger the wake word", which was
+            # true, and is why barge-in never worked on this device.
+            #
+            # It now stays listening with the stop model armed for the reply.
+            # on_wake_word_detected ignores every word except "stop" while `responding`
+            # is set, so a false wake can no longer truncate an answer, and "stop" can
+            # end one. The residual risk is an answer that itself contains the word --
+            # the same trade the Linux satellites make.
+            - script.execute: arm_stop_word
+            - homeassistant.service:
+                service: ctrlable_snapcast_tts.announce
+                data:
+                  url: !lambda return id(last_tts_url);
+                  satellite_id: !lambda return App.get_name();
+                  wake_word: !lambda return id(current_wake_word);
+                  # The slider is published raw even though the DAC gets 0.0, so this
+                  # is the user's actual choice -- see the media_player comment.
+                  volume: !lambda return to_string((int)(id(speaker_media_player).volume * 100));
+            # Only fires if the completion signal never arrives: HA down, integration
+            # too old to expose the sensor, or the sensor wedged ON.
+            - delay: ${announce_max_wait}
+            - if:
+                condition:
+                  lambda: return id(responding);
+                then:
+                  - logger.log: "announce completion signal never arrived; releasing on backstop"
+                  - script.execute: finish_response
 
   # The single place an exchange ends once an answer was routed to Snapcast.
   # Arm the stop word for the length of a reply.
@@ -683,29 +750,64 @@ script:
           id(current_wake_word) = "";
       - script.execute: end_exchange_locally
 
-  # Starts either mWW or the streaming wake word, depending on the configured location
+  # --- Ctrlable: apply Device mode ---
+  - id: apply_device_mode
+    mode: queued
+    then:
+      - lambda: |-
+          id(mode_index) = (int) id(device_mode).active_index().value_or(1);
+          static const char *const NAMES[] = {"Regular", "Snapcast", "Mic only"};
+          ESP_LOGI("mode", "Device mode: %s", NAMES[id(mode_index) % 3]);
+          id(answer_speaker).set_passthrough(id(mode_index) == 0);
+      - if:
+          condition:
+            lambda: return id(mode_index) == 2;
+          then:
+            - voice_assistant.stop:
+            - micro_wake_word.stop:
+            - switch.turn_on: rtp_service
+            - script.execute: set_idle_or_mute_phase
+          else:
+            - switch.turn_off: rtp_service
+            - if:
+                condition:
+                  and:
+                    - voice_assistant.connected:
+                    - not:
+                        micro_wake_word.is_running:
+                then:
+                  - script.execute: start_wake_word
+
+  # Starts either mWW or the streaming wake word, depending on the configured location.
+  # Never in Mic only: the server's assistant listens instead.
   - id: start_wake_word
     then:
       - if:
           condition:
-            and:
-              - not:
-                  - voice_assistant.is_running:
-              - lambda: |-
-                  return id(wake_word_engine_location).current_option() == "On device";
+            lambda: return id(mode_index) == 2;
           then:
-            - lambda: id(va).set_use_wake_word(false);
-            - micro_wake_word.start:
-      - if:
-          condition:
-            and:
-              - not:
-                  - voice_assistant.is_running:
-              - lambda: |-
-                  return id(wake_word_engine_location).current_option() == "In Home Assistant";
-          then:
-            - lambda: id(va).set_use_wake_word(true);
-            - voice_assistant.start_continuous:
+            - logger.log: "Mic only: the server assistant listens, not this device"
+          else:
+            - if:
+                condition:
+                  and:
+                    - not:
+                        - voice_assistant.is_running:
+                    - lambda: |-
+                        return id(wake_word_engine_location).current_option() == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - micro_wake_word.start:
+            - if:
+                condition:
+                  and:
+                    - not:
+                        - voice_assistant.is_running:
+                    - lambda: |-
+                        return id(wake_word_engine_location).current_option() == "In Home Assistant";
+                then:
+                  - lambda: id(va).set_use_wake_word(true);
+                  - voice_assistant.start_continuous:
   # Stops either mWW or the streaming wake word, depending on the configured location
   - id: stop_wake_word
     then:
@@ -774,6 +876,18 @@ switch:
       - microphone.mute:
       - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
       
+  # --- Ctrlable: RTP mic service, on only in Mic only (set by Device mode) ---
+  # Off refuses new sessions and hangs up on the current one at once.
+  - platform: template
+    name: "RTP mic service"
+    id: rtp_service
+    internal: true
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: id(rtp).set_service_enabled(true);
+    on_turn_off:
+      - lambda: id(rtp).set_service_enabled(false);
   - platform: template
     id: timer_ringing
     optimistic: true
@@ -807,6 +921,29 @@ switch:
       - switch.turn_off: timer_ringing
 
 select:
+  # --- Ctrlable: Device mode ---
+  # Regular   answers play on this device, chimes too; the mic pauses while it
+  #           talks (shared I2S bus), so no "stop" barge-in.
+  # Snapcast  answers and chimes play in the room through the Snapcast TTS
+  #           add-on; this device stays silent and keeps listening for "stop".
+  # Mic only  the mic streams over RTP to the hardware manager and a server
+  #           assistant (LVA) listens and answers; this device runs no wake
+  #           word or pipeline of its own.
+  # Same three modes, same names, as the XVF3800. Applied at once, no reboot.
+  - platform: template
+    name: "Device mode"
+    id: device_mode
+    icon: mdi:account-voice
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Snapcast
+    options:
+      - Regular
+      - Snapcast
+      - Mic only
+    on_value:
+      - script.execute: apply_device_mode
   - platform: template
     entity_category: config
     name: Wake word engine location
@@ -821,7 +958,8 @@ select:
     on_value:
       - if:
           condition:
-            lambda: return !id(init_in_progress);
+            # Mic only: neither engine runs here.
+            lambda: return !id(init_in_progress) && id(mode_index) != 2;
           then:
             - wait_until:
                 lambda: return id(voice_assistant_phase) == ${voice_assist_muted_phase_id} || id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
@@ -866,13 +1004,12 @@ select:
       # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
       # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
       # These cutoffs apply only to the specific models included in the firmware:
-      # hey_maya@ctrlable-20260810, hey_jarvis@v2, hey_mycroft@v2.
+      # hey_maya_ff@ctrlable-20261011, okay_maya@ctrlable-20260811.
       #
-      # The hey_jarvis/hey_mycroft numbers are upstream's, measured against the
-      # Dinner Party Corpus. THE hey_maya NUMBERS ARE NOT MEASURED THAT WAY --
-      # there is no DipCo run for our model. They are scaled from its manifest
-      # cutoff of 0.94 (=240/255), which WAS measured, on the training set's own
-      # validation split. Treat them as a sensible spread, not as FAPH figures.
+      # THE hey_maya NUMBERS ARE NOT DipCo FIGURES -- they
+      # come from scoring the far-field model on 17 real far-field wakes plus
+      # TV and overnight audio recorded on beta (2026-10-12), the same three
+      # cutoffs the XVF3800 uses.
       #
       # THE okay_maya NUMBERS *ARE* MEASURED, unusually -- its 30000-sample run
       # produced a real false-accept/false-reject sweep on the QUANTIZED STREAMING
@@ -880,20 +1017,14 @@ select:
       # are therefore directly comparable to upstream's DipCo ones.
       lambda: |-
         if (x == "Slightly sensitive") {
-          id(hey_maya).set_probability_cutoff(240);     // 0.94 - our manifest default
+          id(hey_maya).set_probability_cutoff(235);     // 0.92 - far-field manifest default
           id(okay_maya).set_probability_cutoff(252);    // 0.99 -> 4.77% miss, 0.000 FAPH (measured)
-          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
-          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
         } else if (x == "Moderately sensitive") {
-          id(hey_maya).set_probability_cutoff(217);     // 0.85 - scaled, not DipCo-measured
+          id(hey_maya).set_probability_cutoff(230);     // 0.90 - 15/17 real wakes, 0 false
           id(okay_maya).set_probability_cutoff(250);    // 0.98 -> 3.97% miss, 0.187 FAPH (measured)
-          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
-          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
         } else if (x == "Very sensitive") {
-          id(hey_maya).set_probability_cutoff(179);     // 0.70 - scaled, not DipCo-measured
+          id(hey_maya).set_probability_cutoff(217);     // 0.85 - just under the 0.87 TV peak
           id(okay_maya).set_probability_cutoff(242);    // 0.95 -> 2.80% miss, 0.562 FAPH (measured)
-          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
-          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
         }
 
 # --- Ctrlable: arm the stop word except while the answer is saying it ---
@@ -933,6 +1064,11 @@ interval:
             - logger.log: "stop word disarmed: the answer is about to say it"
 
 globals:
+  # --- Ctrlable: Device mode, as an index (0 Regular, 1 Snapcast, 2 Mic only) ---
+  - id: mode_index
+    type: int
+    restore_value: no
+    initial_value: '1'
   # --- Ctrlable: predicted times this answer says "stop" ---
   - id: stop_mute_windows
     type: std::vector<float>
@@ -978,7 +1114,43 @@ globals:
     initial_value: '""'
  
 
+# --- Ctrlable: the mic over RTP, for Mic only ---
+# The device never knows the server: it listens on tcp/6055, the hardware
+# manager connects and asks, and the RTP goes back to whoever asked for as long
+# as that connection lives (see packages/ctrlable_rtp_mic.yaml for the whole
+# story; that package is XVF-shaped -- two 32-bit slots, an LED ring -- so the
+# parts that apply are inlined here). One bare mic, so one "beam": channel 0,
+# asked for as `beam=asr`. No echo reference: nothing to feed it into.
+rtp_mic:
+  id: rtp
+  microphone:
+    microphone: i2s_mic
+    channels: [0]
+    bits_per_sample: 32
+  control_port: 6055
+  token: ${rtp_mic_token}
+
+# Lets the manager list RTP-capable satellites without anyone typing an IP.
+mdns:
+  services:
+    - service: "_ctrlable-rtp-mic"
+      protocol: "_tcp"
+      port: 6055
+      txt:
+        format: L16/16000/1
+        control: tcp-line/1
+        beams: asr
+        led: "0"
+
 text_sensor:
+  # Who is listening right now: "10.1.8.174:46001 (asr)", or empty.
+  - platform: template
+    name: "RTP mic client"
+    id: rtp_client
+    icon: mdi:ip-network
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: return id(rtp).get_client();
   # --- Ctrlable Snapcast routing ---
   # ONE entity shared by every satellite; its state lists whoever is currently
   # announcing. Each device recognises itself at runtime via App.get_name(),
