@@ -166,8 +166,12 @@ esphome:
         - light.turn_on:
             id: lcd_backlight
             brightness: 80%
+    - priority: -200
+      then:
+        - script.execute: apply_device_mode
     - priority: 100
       then:
+        - lambda: id(faces).set_style_name(id(screen_style).current_option());
         - delay: 200ms
         - script.execute: draw_display
         - delay: 30s
@@ -245,6 +249,22 @@ logger:
 #
 # Acts only on a CHANGE, so a reply that never says it costs two calls in total.
 interval:
+  # --- Ctrlable: Mic only -- redraw when the server's session comes or goes ---
+  # Its words arrive through rtp_mic on_led, but a session starting or ending
+  # is not an event anything else sees. Only on a change, so it never keeps
+  # the screen awake.
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (id(mode_index) != 2) return false;
+              bool has = !id(rtp).get_client().empty();
+              if (has == id(rtp_had_client)) return false;
+              id(rtp_had_client) = has;
+              return true;
+          then:
+            - script.execute: draw_display
   - interval: 250ms
     then:
       - if:
@@ -277,6 +297,20 @@ interval:
             - logger.log: "stop word disarmed: the answer is about to say it"
 
 globals:
+  # --- Ctrlable: Device mode, as an index (1 Snapcast, 2 Mic only) ---
+  - id: mode_index
+    type: int
+    restore_value: no
+    initial_value: '1'
+  # --- Ctrlable faces: what the server's assistant last said, in Mic only ---
+  - id: remote_step
+    type: int
+    restore_value: no
+    initial_value: '9'
+  - id: rtp_had_client
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   # --- Ctrlable: predicted times this answer says "stop" ---
   # Seconds from playback start. Cleared at the end of every reply.
   - id: stop_mute_windows
@@ -383,6 +417,11 @@ external_components:
   - source: github://m5stack/esphome-yaml/components
     components: [axp2101, aw88298, aw9523b ]
     refresh: 0s
+  # Ctrlable faces (Orb / Halo / Dot & Bar), shared with the round Waveshare.
+  - source:
+      type: local
+      path: components
+    components: [ctrlable_faces, rtp_mic]
 
 # PMU
 sensor:
@@ -439,6 +478,12 @@ light:
     output: lcd_backlight_output
     restore_mode: RESTORE_DEFAULT_ON
     default_transition_length: 250ms
+    # The faces stop drawing while the screen is dark: nothing to look at, and
+    # the SPI bus time is better left to audio.
+    on_turn_on:
+      - lambda: id(faces).set_active(true);
+    on_turn_off:
+      - lambda: id(faces).set_active(false);
 
 # some aw9523b inputs (handle interrupts)
 # and other binary sensors
@@ -505,6 +550,9 @@ microphone:
     sample_rate: 16000
     bits_per_sample: 16bit 
     i2s_audio_id: i2s_audio_bus
+    # The listening face follows the real mic level.
+    on_data:
+      - lambda: id(faces).feed_audio(x);
 
 speaker:
   # The real speaker. Still defined -- deleting it would orphan the aw88298 and
@@ -936,6 +984,17 @@ voice_assistant:
     - script.execute: draw_display
 
 switch:
+  # --- Ctrlable: RTP mic service, on only in Mic only (set by Device mode) ---
+  - platform: template
+    name: "RTP mic service"
+    id: rtp_service
+    internal: true
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: id(rtp).set_service_enabled(true);
+    on_turn_off:
+      - lambda: id(rtp).set_service_enabled(false);
   - platform: gpio
     name: "AW RST P0_2"
     pin:
@@ -994,6 +1053,41 @@ switch:
         - script.execute: draw_display
 
 select:
+  # --- Ctrlable: Device mode ---
+  # Snapcast  answers and chimes play in the room through the Snapcast TTS
+  #           add-on; this device keeps listening for "stop".
+  # Mic only  the mic streams over RTP to the hardware manager and a server
+  #           assistant (LVA) listens and answers; the screen follows it.
+  # Applied at once, no reboot. (No Regular: this unit's own speaker is not
+  # wired into the media player -- see the speaker section.)
+  - platform: template
+    name: "Device mode"
+    id: device_mode
+    icon: mdi:account-voice
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Snapcast
+    options:
+      - Snapcast
+      - Mic only
+    on_value:
+      - script.execute: apply_device_mode
+  # --- Ctrlable faces: which design the screen draws ---
+  - platform: template
+    name: "Screen style"
+    id: screen_style
+    icon: mdi:palette-outline
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Orb
+    options:
+      - Orb
+      - Halo
+      - Dot & Bar
+    on_value:
+      - lambda: id(faces).set_style_name(x);
   - platform: template
     entity_category: config
     name: Wake word engine location
@@ -1008,7 +1102,8 @@ select:
     on_value:
       - if:
           condition:
-            lambda: return !id(init_in_progress);
+            # Mic only: neither engine runs here.
+            lambda: return !id(init_in_progress) && id(mode_index) != 2;
           then:
             - wait_until:
                 lambda: return id(voice_assistant_phase) == ${voice_assist_muted_phase_id} || id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
@@ -1096,63 +1191,26 @@ display:
     update_interval: never
     invert_colors: true
     id: m5cores3_lcd
-    pages:
-      - id: idle_page
-        lambda: |-
-          it.fill(id(idle_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_idle), ImageAlign::CENTER);
-          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
-          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
-                   id(mute).state ? "\U000F036D" : "\U000F036C");
-      - id: awake_page
-        lambda: |-
-          it.fill(id(awake_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_awake), ImageAlign::CENTER);
-      - id: listening_page
-        lambda: |-
-          it.fill(id(listening_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_listening), ImageAlign::CENTER);
-          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
-          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
-                   id(mute).state ? "\U000F036D" : "\U000F036C");
-      - id: thinking_page
-        lambda: |-
-          it.fill(id(thinking_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_thinking), ImageAlign::CENTER);
-          it.filled_rectangle(20 , 20 , 280 , 30 , Color::WHITE );
-          it.rectangle(20 , 20 , 280 , 30 , Color::BLACK );
-          it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
-      - id: replying_page
-        lambda: |-
-          it.fill(id(replying_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_replying), ImageAlign::CENTER);
-          it.filled_rectangle(20 , 20 , 280 , 30 , Color::WHITE );
-          it.rectangle(20 , 20 , 280 , 30 , Color::BLACK );
-          it.filled_rectangle(20 , 190 , 280 , 30 , Color::WHITE );
-          it.rectangle(20 , 190 , 280 , 30 , Color::BLACK );
-          it.printf(30, 25, id(font_request), Color::BLACK, "%s", id(text_request).state.c_str());
-          it.printf(30, 195, id(font_response), Color::BLACK, "%s", id(text_response).state.c_str());
-      - id: error_page
-        lambda: |-
-          it.fill(id(error_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_error), ImageAlign::CENTER);
-      - id: no_ha_page
-        lambda: |-
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(error_no_ha), ImageAlign::CENTER);
-      - id: no_wifi_page
-        lambda: |-
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(error_no_wifi), ImageAlign::CENTER);
-      - id: initializing_page
-        lambda: |-
-          it.fill(id(loading_color));
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(casita_initializing), ImageAlign::CENTER);
-      - id: muted_page
-        lambda: |-
-          it.fill(Color::BLACK);
-          it.image((it.get_width() / 2), (it.get_height() / 2), id(ctrlable_muted), ImageAlign::CENTER);
-          // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
-          it.print(283, 200, id(mdi_icon_36), Color::WHITE, TextAlign::CENTER,
-                   id(mute).state ? "\U000F036D" : "\U000F036C");
+    auto_clear_enabled: false
+    # Ctrlable faces draw the whole frame; ctrlable_faces decides when. The
+    # mute icon is drawn INTO that frame (the overlay), so the panel gets one
+    # transfer: no flashing, nothing stale from the panel's own buffer.
+    lambda: |-
+      id(faces).draw(it, [&](display::Display &d) {
+        // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
+        int st = id(faces).get_step();
+        if (st == 1 || st == 3 || st == 6)
+          d.print(283, 200, id(mdi_icon_36), Color(0x8b, 0x9b, 0xa2), TextAlign::CENTER,
+                  id(mute).state ? "\U000F036D" : "\U000F036C", Color::BLACK);
+      });
+
+ctrlable_faces:
+  id: faces
+  display_id: m5cores3_lcd
+  round: false
+  # The mute button owns the bottom-right corner.
+  logo_left: true
+  font: face_label_font
 
 touchscreen:
   - platform: ft63x6
@@ -1169,11 +1227,29 @@ touchscreen:
     on_touch:
       - lambda: |-
             ESP_LOGD("touch", "x=%d, y=%d", touch.x, touch.y);
+      # A tap anywhere while an answer plays stops it, exactly as the stop word
+      # does (same calls). Checked first: the screen is lit during an answer,
+      # and a hand is the reliable "stop" when the room is loud.
+      - if:
+          condition:
+            lambda: return id(responding);
+          then:
+            - logger.log: "tap: stopping the answer"
+            - lambda: id(last_wake_ms) = millis();
+            - homeassistant.service:
+                service: ctrlable_snapcast_tts.stop
+                data:
+                  satellite_id: !lambda return App.get_name();
+                  wake_word: !lambda return id(current_wake_word);
+            - media_player.stop:
+                announcement: true
+            - script.execute: finish_response
+            - script.execute: screen_wake
       # A touch on a sleeping screen only wakes it. Waking and acting on the
       # same tap means you cannot see what you are about to press.
       - if:
           condition:
-            lambda: return !id(lcd_backlight).current_values.is_on();
+            lambda: return !id(responding) && !id(lcd_backlight).current_values.is_on();
           then:
             - script.execute: screen_wake
           else:
@@ -1332,62 +1408,58 @@ script:
       # the screen and restarts the sleep countdown. The transition back to idle
       # at the end of an exchange is itself a redraw, which is what re-arms it.
       - script.execute: screen_wake
+      # Pick the face; ctrlable_faces redraws as soon as it changes, and keeps
+      # redrawing only while it moves.
+      - lambda: |-
+          int st;
+          if (id(init_in_progress)) st = 0;
+          else if (!wifi::global_wifi_component->is_connected()) st = 8;
+          else if (id(mode_index) == 2) {
+            // Mic only: the server's assistant. No session means it cannot reach us.
+            st = id(rtp).get_client().empty() ? 9 : id(remote_step);
+            if (id(mute).state) st = 6;
+          }
+          else if (id(va).get_api_connection() == nullptr) st = 9;   // Ctrlable Pro has not subscribed (a log viewer does not count)
+          else switch (id(voice_assistant_phase)) {
+            case ${voice_assist_awake_phase_id}: st = 2; break;
+            case ${voice_assist_listening_phase_id}: st = 3; break;
+            case ${voice_assist_thinking_phase_id}: st = 4; break;
+            case ${voice_assist_replying_phase_id}: st = 5; break;
+            case ${voice_assist_error_phase_id}: st = 7; break;
+            case ${voice_assist_muted_phase_id}: st = 6; break;
+            case ${voice_assist_not_ready_phase_id}: st = 9; break;
+            default: st = 1;
+          }
+          id(faces).set_step(st);
+  # Starts either mWW or the streaming wake word, depending on the configured location
+  # --- Ctrlable: Device mode (see the select) ---
+  - id: apply_device_mode
+    mode: queued
+    then:
+      - lambda: |-
+          // Same indexes as the AtomS3R and the Waveshare: 1 Snapcast, 2 Mic only.
+          id(mode_index) = id(device_mode).active_index().value_or(0) == 1 ? 2 : 1;
+          ESP_LOGI("mode", "Device mode: %s", id(mode_index) == 2 ? "Mic only" : "Snapcast");
       - if:
           condition:
-            lambda: return !id(init_in_progress);
+            lambda: return id(mode_index) == 2;
           then:
+            - voice_assistant.stop:
+            - micro_wake_word.stop:
+            - switch.turn_on: rtp_service
+            - script.execute: set_idle_or_mute_phase
+          else:
+            - switch.turn_off: rtp_service
             - if:
                 condition:
-                  wifi.connected:
+                  and:
+                    - voice_assistant.connected:
+                    - not:
+                        micro_wake_word.is_running:
                 then:
-                  - if:
-                      condition:
-                        api.connected:
-                      then:
-                        - lambda: |
-                            switch(id(voice_assistant_phase)) {
-                              case ${voice_assist_awake_phase_id}:
-                                id(m5cores3_lcd).show_page(awake_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_listening_phase_id}:
-                                id(m5cores3_lcd).show_page(listening_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_thinking_phase_id}:
-                                id(m5cores3_lcd).show_page(thinking_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_replying_phase_id}:
-                                id(m5cores3_lcd).show_page(replying_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_error_phase_id}:
-                                id(m5cores3_lcd).show_page(error_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_muted_phase_id}:
-                                id(m5cores3_lcd).show_page(muted_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              case ${voice_assist_not_ready_phase_id}:
-                                id(m5cores3_lcd).show_page(no_ha_page);
-                                id(m5cores3_lcd).update();
-                                break;
-                              default:
-                                id(m5cores3_lcd).show_page(idle_page);
-                                id(m5cores3_lcd).update();
-                            }
-                      else:
-                        - display.page.show: no_ha_page
-                        - component.update: m5cores3_lcd
-                else:
-                  - display.page.show: no_wifi_page
-                  - component.update: m5cores3_lcd
-          else:
-            - display.page.show: initializing_page
-            - component.update: m5cores3_lcd
-  # Starts either mWW or the streaming wake word, depending on the configured location
+                  - script.execute: start_wake_word
+      - script.execute: draw_display
+
   - id: start_wake_word
     then:
       - if:
@@ -1396,7 +1468,7 @@ script:
               - not:
                   - voice_assistant.is_running:
               - lambda: |-
-                  return id(wake_word_engine_location).current_option() == "On device";
+                  return id(mode_index) != 2 && id(wake_word_engine_location).current_option() == "On device";
           then:
             - lambda: id(va).set_use_wake_word(false);
             - micro_wake_word.start:
@@ -1406,7 +1478,7 @@ script:
               - not:
                   - voice_assistant.is_running:
               - lambda: |-
-                  return id(wake_word_engine_location).current_option() == "In Home Assistant";
+                  return id(mode_index) != 2 && id(wake_word_engine_location).current_option() == "In Home Assistant";
           then:
             - lambda: id(va).set_use_wake_word(true);
             - voice_assistant.start_continuous:
@@ -1457,59 +1529,8 @@ script:
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
 
-image:
-  - file: ${error_illustration_file}
-    id: casita_error
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${awake_illustration_file}
-    id: casita_awake
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${idle_illustration_file}
-    id: casita_idle
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${listening_illustration_file}
-    id: casita_listening
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${thinking_illustration_file}
-    id: casita_thinking
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${replying_illustration_file}
-    id: casita_replying
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${loading_illustration_file}
-    id: casita_initializing
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${error_no_wifi_illustration_file}
-    id: error_no_wifi
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  - file: ${error_no_ha_illustration_file}
-    id: error_no_ha
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
-  # --- Ctrlable: the mute page drew a generic MDI glyph; there is a real
-  # ctrlable_mute expression, so use it and keep the set coherent. ---
-  - file: ${mute_illustration_file}
-    id: ctrlable_muted
-    resize: 320x240
-    type: RGB
-    transparency: alpha_channel
+# The Casita-style images (images/*.png) are no longer compiled in: the screen
+# draws Ctrlable faces instead. They stay in the repo, unused.
 
 font:
   - file:
@@ -1529,6 +1550,15 @@ font:
     size: 15
     glyphsets:
       - ${font_glyphsets}
+
+  # Labels for the four problem-state faces.
+  - file:
+      type: gfonts
+      family: Figtree
+      weight: 500
+    id: face_label_font
+    size: 16
+    glyphs: " -CFMNPRSWabcefghilmnoprstw’"
 
   # Was mdi_icon_128 with a single 128px glyph that nothing drew -- dead flash.
   # Now the on-screen mute button: two glyphs at a size that fits a corner.
@@ -1610,3 +1640,41 @@ color:
     hex: ${error_illustration_background_color}
   - id: awake_color
     hex: ${awake_illustration_background_color}
+
+# --- Ctrlable: the mic over RTP, for Mic only ---
+# Same as the AtomS3R's: the device never knows the server -- the hardware
+# manager connects to tcp/6055 and asks. One beam, "asr": channel 0.
+rtp_mic:
+  id: rtp
+  microphone:
+    microphone: i2s_mic
+    channels: [0]
+    bits_per_sample: 32
+  control_port: 6055
+  token: ""
+  # In Mic only the conversation runs on the server; its assistant's events
+  # arrive here as words and pick the face.
+  on_led:
+    - lambda: |-
+        int st = -1;
+        if (x == "idle") st = 1;
+        else if (x == "wake") st = 2;
+        else if (x == "listening") st = 3;
+        else if (x == "thinking") st = 4;
+        else if (x == "speaking") st = 5;
+        else if (x == "error") st = 7;
+        else if (x == "disconnected") st = 9;
+        if (st >= 0) id(remote_step) = st;
+    - script.execute: draw_display
+
+# Lets the manager list RTP-capable satellites without anyone typing an IP.
+mdns:
+  services:
+    - service: "_ctrlable-rtp-mic"
+      protocol: "_tcp"
+      port: 6055
+      txt:
+        format: L16/16000/1
+        control: tcp-line/1
+        beams: asr
+        led: "1"
