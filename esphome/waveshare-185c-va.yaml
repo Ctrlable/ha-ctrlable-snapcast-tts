@@ -111,6 +111,46 @@ esphome:
   name_add_mac_suffix: false
   min_version: 2026.1.0
   on_boot:
+    # --- Ctrlable: ES7210 into 4-channel TDM ---
+    # ESPHome 2026.9's es7210 leaves MIC3/MIC4 unusable: REG06 = 0x04 keeps
+    # their ADC powered down, REG01 keeps their clocks off, and it has no TDM
+    # option. This is Espressif's own TDM start (esp_codec_dev es7210_start):
+    # clocks on, REG06 0x00, REG40 0x43, MIC3/4 powered, SDP TDM, then the
+    # state-machine restart.
+    #
+    # Gains: MIC1/2 at 18 dB, not ESPHome's 24 -- the board's own chime reached
+    # -5 dBFS RMS and clipped ~6000 samples/s at 24 dB, which no AEC survives.
+    # NOT lower: at 6 dB the mic's noise was 1-2 LSB, speech at 1.5 ft only
+    # -70 dBFS, and the AEC's own output floor (-78) sat 8 dB under it -- STT
+    # garbled everything and "stop" scored low (capture 2026-10-18). The wake
+    # word and the assistant get the 6 dB back as gain_factor. MIC3 (the
+    # reference) at 0 dB: it is a line-level copy of the DAC output.
+    - priority: 200
+      then:
+        - lambda: |-
+            auto *adc = id(es7210_adc);
+            auto set_gain = [adc](uint8_t reg, uint8_t idx) {
+              uint8_t g = 0;
+              if (adc->read_byte(reg, &g))
+                adc->write_byte(reg, (g & ~0x1F) | 0x10 | idx);
+            };
+            uint8_t c = 0;
+            if (adc->read_byte(0x01, &c))
+              adc->write_byte(0x01, c & ~0x1F);   // ADC1-4 and MIC1-4 clocks on
+            adc->write_byte(0x06, 0x00);          // nothing powered down
+            adc->write_byte(0x40, 0x43);
+            adc->write_byte(0x4B, 0x00);          // MIC1/2 power
+            adc->write_byte(0x4C, 0x00);          // MIC3/4 power
+            adc->write_byte(0x11, 0x60);          // 16-bit, I2S
+            adc->write_byte(0x12, 0x02);          // TDM
+            set_gain(0x43, 6);                    // MIC1 18 dB
+            set_gain(0x44, 6);                    // MIC2 18 dB
+            set_gain(0x45, 0);                    // MIC3  0 dB (reference)
+            adc->write_byte(0x00, 0x71);
+            adc->write_byte(0x00, 0x41);
+            uint8_t r01 = 0, r06 = 0, r12 = 0;
+            adc->read_byte(0x01, &r01); adc->read_byte(0x06, &r06); adc->read_byte(0x12, &r12);
+            ESP_LOGI("duplex", "ES7210 TDM: 01=%02X 06=%02X 12=%02X", r01, r06, r12);
     - priority: 600
       then:
         - delay: 30s
@@ -133,7 +173,7 @@ external_components:
   - source:
       type: local
       path: components
-    components: [gate_speaker, rtp_mic, ctrlable_faces]
+    components: [gate_speaker, rtp_mic, ctrlable_faces, duplex_i2s]
 
 esp32:
   variant: esp32s3
@@ -156,6 +196,16 @@ api:
   encryption:
     # Its own key, kept in the add-on's secrets.yaml -- never in this repo.
     key: !secret waveshare_185c_840034_api_key
+  # Diagnostic: record mic / reference / AEC output and send it to host:port
+  # (raw int16 x3 at 16 kHz; see tools/duplex_i2s/). Does nothing unless called.
+  actions:
+    - action: capture_audio
+      variables:
+        seconds: int
+        host: string
+        port: int
+      then:
+        - lambda: id(i2s_mic).capture(seconds, host, port);
 
 ota:
   - platform: esphome
@@ -212,12 +262,27 @@ i2c:
   scan: false
   id: i2c0
 
-# I2S Bus Configuration
-i2s_audio:
-  - id: i2s_audio_bus
-    i2s_lrclk_pin: GPIO38
-    i2s_bclk_pin: GPIO48
-    i2s_mclk_pin: GPIO2
+# --- Ctrlable: ONE I2S port, speaker and microphone at the same time ---
+# ESPHome's i2s_audio lets only one of them hold a shared bus, so the mic was
+# OFF for as long as this device made a sound and the stop word could never
+# hear anything during an answer (2026-10-17). duplex_i2s runs both on one
+# 48 kHz clock and hands the wake word 16 kHz (see the component).
+duplex_i2s:
+  id: duplex_bus
+  mclk_pin: GPIO2
+  bclk_pin: GPIO48
+  lrclk_pin: GPIO38
+  dout_pin: GPIO47
+  din_pin: GPIO39
+  sample_rate: 48000
+  # TDM, Philips framing, four 16-bit slots -- the layout of the working
+  # 1.85C-BOX V2 profile in n-IA-hane/esphome-intercom (MIT). The ES7210
+  # orders its slots MIC1, MIC3, MIC2, MIC4; MIC3 is the board's analog
+  # loopback of the ES8311 output, i.e. the echo reference. The ES8311 stays
+  # in plain I2S and reads slot 0. (DSP/PCM framing: worse sound, 2026-10-17.)
+  slots: 4
+  tdm_format: philips
+  slot_width: 16
 
 audio_dac:
   - platform: es8311
@@ -228,33 +293,39 @@ audio_dac:
 
 # Two analog mics on MIC1/MIC2. MIC3 carries a hardware copy of the speaker
 # (an echo reference) that stock ESPHome cannot read yet -- es7210 TDM landed in
-# dev on 2026-10-12 -- so it is not used here.
+# dev on 2026-10-12 -- so it is not used here. 48 kHz: the bus clock is shared.
 audio_adc:
   - platform: es7210
     id: es7210_adc
     i2c_id: i2c0
     bits_per_sample: 16bit
-    sample_rate: 16000
+    sample_rate: 48000
 
 microphone:
-  - platform: i2s_audio
+  - platform: duplex_i2s
     id: i2s_mic
-    sample_rate: 16000
-    i2s_din_pin: GPIO39
-    bits_per_sample: 16bit
-    adc_type: external
+    # TDM slots: 0 MIC1, 1 MIC2, 2 MIC3 = speaker copy, 3 MIC4.
+    # Slot 2 = MIC2, the mic this board has used all along. Slot 1 = MIC3, the
+    # hardware copy of the speaker. (An earlier reading of MIC3 as "not wired"
+    # was ESPHome 2026.9 leaving its ADC powered down and unclocked.)
+    slot: 2
+    reference_slot: 1
+    echo_cancellation: true
+    aec_mode: sr_high_perf
+    aec_nlp: normal
+    # Two-mic ESP-SR AFE (front_end: MRM) is implemented but OFF. Only its
+    # low-cost mode fits beside the firmware here (high perf: display err 101,
+    # TLS fetch failure, task WDT), and low cost removed ~0 dB at the start of
+    # an answer, ~25 dB only after ~10 s -- worse than this single-mic AEC
+    # (capture 2026-10-18 01:32). To make it fit it also needed static faces and
+    # the n-IA-hane profile's TLS/Wi-Fi sdkconfig.
     # The listening face follows the real mic level.
     on_data:
       - lambda: id(faces).feed_audio(x);
 
 speaker:
-  - platform: i2s_audio
+  - platform: duplex_i2s
     id: i2s_speaker
-    i2s_dout_pin: GPIO47
-    dac_type: external
-    sample_rate: 48000
-    bits_per_sample: 16bit
-    channel: left
     audio_dac: es8311_dac
   # --- Ctrlable: the speaker the media player actually plays to ---
   #
@@ -315,7 +386,7 @@ media_player:
           condition:
             and:
               - microphone.is_capturing:
-              - lambda: return !id(responding);
+              - lambda: return !id(responding) && !id(local_reply);
           then:
             - script.execute: stop_wake_word
             # Ensure VA stops before moving on
@@ -358,7 +429,12 @@ media_player:
 
 micro_wake_word:
   id: mww
-  microphone: i2s_mic
+  # The ES7210 PGA runs 6 dB lower than ESPHome's 24 dB default so the
+  # device's own playback cannot clip the mic (see the boot lambda); the
+  # wake word gets those 6 dB back here, after echo cancellation.
+  microphone:
+    microphone: i2s_mic
+    gain_factor: 2
   stop_after_detection: false
   models:
     # OUR FAR-FIELD RETRAIN (2026-10-11, ctrlable-wakewords hey_maya_ff), local
@@ -404,6 +480,24 @@ micro_wake_word:
     # to avoid by shutting the engine off entirely. Acting on it would end the
     # reply at random. So the engine keeps listening and we narrow what counts:
     # "stop" ends the answer, every other word waits until it finishes.
+    # --- Ctrlable: "stop" during an answer playing on THIS device (Regular) ---
+    # Only the local media player to stop; the exchange then ends the stock way.
+    - if:
+        condition:
+          and:
+            - lambda: return id(local_reply);
+            - lambda: |-
+                std::string w = wake_word;
+                for (auto &ch : w) ch = tolower(ch);
+                return w == "stop";
+        then:
+          - logger.log: "barge-in: stop word during a local reply"
+          - lambda: |-
+              id(last_wake_ms) = millis();
+              id(local_reply) = false;
+          - media_player.stop:
+              announcement: true
+
     - if:
         condition:
           and:
@@ -507,7 +601,7 @@ micro_wake_word:
             # Never start a new exchange while one is still answering. Previously
             # implicit, because the engine was stopped for the duration; now that
             # it keeps listening for "stop", it has to be said out loud.
-            - lambda: return !id(responding);
+            - lambda: return !id(responding) && !id(local_reply);
         then:
           - lambda: id(last_wake_ms) = millis();
           - script.execute:
@@ -516,7 +610,9 @@ micro_wake_word:
 
 voice_assistant:
   id: va
-  microphone: i2s_mic
+  microphone:
+    microphone: i2s_mic
+    gain_factor: 2   # see micro_wake_word
   media_player: speaker_media_player
   micro_wake_word: mww
   noise_suppression_level: 2
@@ -810,6 +906,7 @@ script:
                   media_player.is_announcing:
               - not:
                   speaker.is_playing: answer_speaker
+      - lambda: id(local_reply) = false;
       - if:
           condition:
             - lambda: |-
@@ -838,6 +935,12 @@ script:
             lambda: return id(mode_index) == 0;
           then:
             - logger.log: "answer plays on this device (Regular mode); not sent to Snapcast"
+            # duplex_i2s keeps the mic open while this device speaks, so the
+            # wake word stays running and the stop word is armed for the reply,
+            # just as in Snapcast mode. `local_reply` (not `responding`) so the
+            # exchange still ends the stock way, on the media player.
+            - lambda: id(local_reply) = true;
+            - script.execute: arm_stop_word
           else:
             - lambda: id(responding) = true;
             # The engine used to be stopped here -- "the answer plays through speakers
@@ -1236,7 +1339,7 @@ interval:
       - if:
           condition:
             lambda: |-
-              if (!id(responding)) return false;
+              if (!id(responding) && !id(local_reply)) return false;
               float el = (millis() - id(playback_start_ms)) / 1000.0f;
               for (float c : id(stop_mute_windows)) {
                 float g = ${stop_guard_base_s} + ${stop_guard_rate} * c;
@@ -1245,12 +1348,20 @@ interval:
               return !id(stop_model_armed);
           then:
             - micro_wake_word.enable_model: stop
-            - lambda: id(stop_model_armed) = true;
+            # 0.18, not the model's 0.50: measured on a capture of this board
+            # mid-answer (2026-10-17), the 5-frame average of the stop model on
+            # the echo-cancelled mic peaked at 0.24 for spoken "stop"s that were
+            # missed, and at 0.04 everywhere else in the answer. It is only
+            # armed while an answer plays, and steps aside where the answer
+            # itself says "stop", so nothing else sees this threshold.
+            - lambda: |-
+                id(stop).set_probability_cutoff(46);
+                id(stop_model_armed) = true;
       - if:
           condition:
             lambda: |-
               if (!id(stop_model_armed)) return false;
-              if (!id(responding)) return false;
+              if (!id(responding) && !id(local_reply)) return false;
               float el = (millis() - id(playback_start_ms)) / 1000.0f;
               for (float c : id(stop_mute_windows)) {
                 float g = ${stop_guard_base_s} + ${stop_guard_rate} * c;
@@ -1326,6 +1437,12 @@ globals:
   # reports it finished. Gates the wake word so the mic does not reopen while
   # the room is still talking.
   - id: responding
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # True while an answer plays on THIS device (Regular mode, duplex_i2s): the
+  # wake word keeps running through it and only "stop" may act.
+  - id: local_reply
     type: bool
     restore_value: no
     initial_value: "false"

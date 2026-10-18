@@ -73,12 +73,19 @@ class CtrlableFaces : public Component {
     this->level_ms_ = millis();
   }
   void set_floor_db(float f) { this->floor_db_ = -f; }  // e.g. -58 for a quiet room
+  // Stretch every frame interval: 2 = half the frame rate. Each frame is a
+  // full-screen write to PSRAM plus a DMA read of it, and on the round board
+  // that bandwidth starved the two-mic AFE (it kept real time only with the
+  // screen off, 2026-10-18).
+  void set_frame_scale(uint32_t s) { this->frame_scale_ = s; }
 
+  uint32_t frame_scale_{1};
   void loop() override {
     if (this->display_ == nullptr || !this->active_) return;
     uint32_t now = millis();
     float t = (now - this->step_start_) / 1000.0f;
-    uint32_t iv = ::cfaces::frame_interval_ms(this->step_, t);
+    // frame_scale 0 = static: draw only when the face changes (no animation).
+    uint32_t iv = this->frame_scale_ == 0 ? 0 : ::cfaces::frame_interval_ms(this->step_, t) * this->frame_scale_;
     if (this->dirty_ || (iv != 0 && now - this->last_frame_ >= iv)) {
       this->dirty_ = false;
       this->last_frame_ = now;

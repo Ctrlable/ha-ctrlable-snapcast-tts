@@ -32,6 +32,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
         cv.Optional(CONF_ROUND, default=False): cv.boolean,
         cv.Optional(CONF_LOGO_LEFT, default=False): cv.boolean,
+        # 2 = half the frame rate; 0 = static, redrawn only when the face
+        # changes (see CtrlableFaces::set_frame_scale).
+        cv.Optional("frame_scale", default=1): cv.int_range(0, 8),
         cv.Optional(CONF_FONT): cv.use_id(font.Font),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -43,5 +46,6 @@ async def to_code(config):
     cg.add(var.set_display(await cg.get_variable(config[CONF_DISPLAY_ID])))
     cg.add(var.set_round(config[CONF_ROUND]))
     cg.add(var.set_logo_left(config[CONF_LOGO_LEFT]))
+    cg.add(var.set_frame_scale(config["frame_scale"]))
     if CONF_FONT in config:
         cg.add(var.set_font(await cg.get_variable(config[CONF_FONT])))
