@@ -1,0 +1,67 @@
+# reSpeaker XVF3800 with XIAO ESP32S3 -- USB MIC MODE, the ESP32 standing aside.
+#
+# The XVF3800 has its own USB-C port and, on its USB firmware, is a complete
+# USB audio device: mics out, echo reference in, LED ring over USB control.
+# The ESP32 is then not needed for audio at all. This is what it runs then.
+#
+# WHY A SEPARATE, MINIMAL FIRMWARE AND NOT A MODE OF THE FULL ONE: the full
+# config's respeaker_xvf3800 component checks the XMOS version at every boot
+# and, if it is not the I2S image it carries (1.0.7), flashes that image back
+# over I2C (respeaker_xvf3800.cpp setup(): "Expected XMOS version ...
+# Updating..."). Left on the ESP32 it would undo the USB firmware the first
+# time it booted. So this config has no respeaker_xvf3800, no i2c, no i2s:
+# nothing here touches the XVF's buses.
+#
+# Same name as the full config (xvf3800-1-75357c) so it stays the same device
+# in Home Assistant and in the add-on; OTA works either way.
+#
+# CUTOVER ORDER (see /root/xvf-fw/xvf-usb-cutover.sh on beta):
+#   1. OTA THIS to the ESP32 first -- before the XVF is reflashed;
+#   2. plug the XVF's USB-C into the active extender, flash the USB image;
+#   3. back to Wi-Fi/I2S: OTA the full config again. Its own auto-update then
+#      puts the I2S image (1.0.7) back by itself, over I2C.
+
+substitutions:
+  name: xvf3800-1-75357c
+  friendly_name: XVF3800 Assistant 1 75357c
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.6.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    version: recommended
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  reboot_timeout: 10min
+
+logger:
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+
+text_sensor:
+  - platform: template
+    name: "Device mode"
+    icon: mdi:usb
+    entity_category: diagnostic
+    lambda: return {"USB mic (ESP32 idle)"};
+    update_interval: 1h
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: config

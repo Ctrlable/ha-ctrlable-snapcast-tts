@@ -312,8 +312,12 @@ void RtpMic::serve_(Conn &c) {
       c.buf.erase(0, nl + 1);
       const auto reply =
           this->sessions_.handle_line(c.fd, c.ip, c.ip_text, line, millis(), this->ssrc_, this->payload_type_);
-      const std::string out = reply.line + "\n";
-      lwip_send(c.fd, out.data(), out.size(), 0);
+      if (!reply.line.empty()) {
+        const std::string out = reply.line + "\n";
+        lwip_send(c.fd, out.data(), out.size(), 0);
+      }
+      if (!reply.led.empty())
+        this->led_trigger_.trigger(reply.led);
       if (reply.line.rfind("ERR", 0) == 0)
         ESP_LOGW(TAG, "%s: '%s' -> %s", c.ip_text.c_str(), line.c_str(), reply.line.c_str());
       changed |= reply.changed;

@@ -2,6 +2,7 @@
 
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/core/component.h"
+#include "esphome/core/automation.h"
 #include "esphome/core/defines.h"
 
 #ifdef USE_RTP_MIC_REFERENCE
@@ -53,6 +54,9 @@ class RtpMic : public Component {
   // so the device declines it and the server stops sending. Call from the
   // "Play answers on this device" switch.
   void set_answers_local(bool local);
+
+  // Mic-only mode: the server's "LED <state>" (see rtp_session.h).
+  Trigger<std::string> *get_led_trigger() { return &this->led_trigger_; }
   bool is_reference_active() const { return this->ref_active_.load(); }
 #ifdef USE_RTP_MIC_REFERENCE
   void set_reference(speaker::Speaker *source, mixer_speaker::MixerSpeaker *mixer, uint16_t port, uint32_t queue_ms) {
@@ -83,6 +87,7 @@ class RtpMic : public Component {
   static void ref_task_(void *arg);
 #endif
 
+  Trigger<std::string> led_trigger_;
   microphone::MicrophoneSource *source_{nullptr};
   uint8_t payload_type_{96};
   uint8_t packet_ms_{20};

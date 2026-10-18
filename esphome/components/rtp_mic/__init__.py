@@ -21,6 +21,7 @@ only opened while a server offers it AND the device's answers play in the room;
 in local mode the XVF hears its own output and nothing runs.
 """
 
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components import microphone
 import esphome.config_validation as cv
@@ -38,6 +39,7 @@ CONF_SOURCE_SPEAKER = "source_speaker"
 CONF_MIXER = "mixer"
 CONF_PORT = "port"
 CONF_QUEUE_MS = "queue_ms"
+CONF_ON_LED = "on_led"
 
 rtp_mic_ns = cg.esphome_ns.namespace("rtp_mic")
 RtpMic = rtp_mic_ns.class_("RtpMic", cg.Component)
@@ -82,6 +84,8 @@ CONFIG_SCHEMA = cv.Schema(
         # size its jitter buffer around; shorter wastes Wi-Fi airtime on headers.
         cv.Optional(CONF_PACKET_MS, default=20): cv.int_range(5, 40),
         cv.Optional(CONF_REFERENCE): REFERENCE_SCHEMA,
+        # Mic-only mode: the server drives the LED ring. `x` is the state word.
+        cv.Optional(CONF_ON_LED): automation.validate_automation(single=True),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -106,6 +110,8 @@ async def to_code(config):
     cg.add(var.set_control_port(config[CONF_CONTROL_PORT]))
     if config[CONF_TOKEN]:
         cg.add(var.set_token(config[CONF_TOKEN]))
+    if conf := config.get(CONF_ON_LED):
+        await automation.build_automation(var.get_led_trigger(), [(cg.std_string, "x")], conf)
     if ref := config.get(CONF_REFERENCE):
         cg.add_define("USE_RTP_MIC_REFERENCE")
         source = await cg.get_variable(ref[CONF_SOURCE_SPEAKER])

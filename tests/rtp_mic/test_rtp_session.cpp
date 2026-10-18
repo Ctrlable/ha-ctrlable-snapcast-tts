@@ -166,6 +166,23 @@ int main() {
     CHECK(d.changed && t.current().ref_delay_ms == 80, "a new delay is a change (the buffer must re-anchor)");
   }
 
+  // 9. LED: the session owner drives the ring (Mic-only mode, the wake word runs
+  //    on the server). Silent on purpose -- the manager sends these from a second
+  //    thread, and a reply would land where its KEEPALIVE reader expects "OK ALIVE".
+  {
+    SessionTable t;
+    t.handle_line(1, BETA, "10.1.8.174", "START 46000", 0, 1, 96);
+    Reply r = t.handle_line(1, BETA, "10.1.8.174", "LED listening\r", 10, 1, 96);
+    CHECK(r.led == "listening", "owner's LED state is passed on");
+    CHECK(r.line.empty() && !r.close && !r.changed, "LED gets no reply and keeps the session");
+    Reply o = t.handle_line(2, OTHER, "10.1.8.58", "LED error", 20, 1, 96);
+    CHECK(o.led.empty() && o.line.empty() && !o.close, "a non-owner cannot drive the ring, and is not told");
+    CHECK(t.handle_line(1, BETA, "10.1.8.174", "LED", 30, 1, 96).led.empty(), "LED without a state is ignored");
+    CHECK(t.handle_line(1, BETA, "10.1.8.174", "LED " + std::string(40, 'x'), 30, 1, 96).led.empty(),
+          "an oversized state is ignored");
+    CHECK(t.current().active && t.current().port == 46000, "LED never touches the stream");
+  }
+
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return 1;

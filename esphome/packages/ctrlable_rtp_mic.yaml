@@ -26,9 +26,10 @@
 # token if the LAN carries guests or untrusted devices; it is sent in clear
 # text, so it keeps out the curious, not someone sniffing the network.
 #
-# WAKE WORD. The device's own micro_wake_word is untouched and keeps working
-# whether or not anyone is streaming. A server assistant fed from this stream
-# is the other option; running both is allowed and is the manager's choice.
+# WAKE WORD. On the XVF3800 the service runs only in "Mic only" mode, where the
+# device's own wake word is stopped and a server assistant (LVA, created in the
+# hardware manager on this mic) listens instead -- and drives the LED ring back
+# through `LED <state>` on the same control connection.
 #
 # BEAM. formatBCE's int-host 48k firmware puts the XVF3800's outputs on two
 # I2S slots, read here as two channels. This config already gives
@@ -40,7 +41,9 @@
 #
 # ECHO REFERENCE. The manager may offer the room's mix back (`ref=<ms>` on
 # START); a device whose config wires `rtp_mic: reference:` takes it on udp/6056
-# and plays it, silently, into the XVF3800's echo-reference input. Server-side
+# and plays it, silently, into the XVF3800's echo-reference input. Measured
+# 2026-10-10 with music: 0 dB -- it reaches the XVF later than the echo -- so
+# the XVF3800 satellite no longer wires it. Server-side
 # cancelling of the XVF's output does not work (measured 2026-10-10: 0.0-0.3
 # dB) because that output is already non-linearly processed; the canceller has
 # to be the XVF's own. Declined while the device plays its answers itself.
@@ -56,6 +59,27 @@ rtp_mic:
     bits_per_sample: 32
   control_port: 6055
   token: ${rtp_mic_token}
+  # Mic-only mode: the server assistant's state, relayed by the hardware
+  # manager from LVA's peripheral API. Mapped onto the phases the device's own
+  # LED scripts already draw, so the ring looks the same either way.
+  on_led:
+    - lambda: |-
+        int phase;
+        if (x == "idle") phase = ${voice_assist_idle_phase_id};
+        else if (x == "wake") phase = ${voice_assist_waiting_for_command_phase_id};
+        else if (x == "listening") phase = ${voice_assist_listening_for_command_phase_id};
+        else if (x == "thinking") phase = ${voice_assist_thinking_phase_id};
+        else if (x == "speaking") phase = ${voice_assist_replying_phase_id};
+        else if (x == "error") phase = ${voice_assist_error_phase_id};
+        else if (x == "disconnected") phase = ${voice_assist_not_ready_phase_id};
+        else {
+          ESP_LOGW("rtp_mic", "unknown LED state '%s'", x.c_str());
+          return;
+        }
+        if (id(mode_index) != 2)
+          return;  // only Mic only hands the ring to the server
+        id(voice_assistant_phase) = phase;
+        id(control_leds).execute();
 
 # Lets the manager list RTP-capable satellites without anyone typing an IP.
 mdns:
@@ -67,22 +91,18 @@ mdns:
         format: L16/16000/1
         control: tcp-line/1
         beams: asr,wakeword
-        # Takes the room's mix back as the echo reference when the device's
-        # own config wires `reference:` (see the XVF3800 satellite).
-        reference: L16/16000/1
+        led: "1"
 
 switch:
-  # ON by default, and why that is safe: in the pull model nothing streams
-  # until a server asks, so "on" only means "a server MAY ask". Off is the
-  # local privacy switch -- it refuses new sessions and hangs up on the current
-  # one at once, without touching the device's own wake word.
+  # Off refuses new sessions and hangs up on the current one at once. Set by
+  # the device's "Device mode" (on only in Mic only), hence internal; a satellite
+  # without a mode select can make it visible and restore it instead.
   - platform: template
     name: "RTP mic service"
     id: rtp_service
-    icon: mdi:microphone-message
-    entity_category: config
+    internal: true
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+    restore_mode: ALWAYS_OFF
     on_turn_on:
       - lambda: id(rtp).set_service_enabled(true);
     on_turn_off:

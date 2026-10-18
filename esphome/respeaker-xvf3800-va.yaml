@@ -90,15 +90,6 @@ substitutions:
 packages:
   rtp_mic: !include packages/ctrlable_rtp_mic.yaml
 
-# Merged into the package's rtp_mic. The reference plays through its own mixer
-# source into the XVF's I2S input -- the XVF's echo reference -- while the DAC
-# stays muted, so the room never hears it. Used only while answers go to
-# Snapcast; see "Play answers on this device".
-rtp_mic:
-  reference:
-    source_speaker: ref_mixing_input
-    mixer: mixing_speaker
-
 esphome:
   name: respeaker-xvf3800
   friendly_name: reSpeaker XVF3800 Assistant
@@ -154,6 +145,9 @@ esphome:
             then:
               - lambda: id(init_in_progress) = false;
               - script.execute: control_leds
+    - priority: -200
+      then:
+        - script.execute: apply_device_mode
     - priority: -100
       then:
         - lambda: |-
@@ -188,10 +182,6 @@ esp32:
 
       CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
 
-      # rtp_mic's echo reference arrives as 100 small UDP packets a second and
-      # is drained every ~5 ms. lwIP's default queue of 6 holds 60 ms -- one
-      # Wi-Fi retry burst. 16 holds 160 ms; it costs pointers, not buffers.
-      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "16"
       CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
 
 wifi:
@@ -275,6 +265,11 @@ psram:
   ignore_not_found: false  # The VPE has PSRAM, so this is safe. Allows configuring WiFi driver to use more resources (done automatically by the speaker media player)
 
 globals:
+  # --- Ctrlable: Device mode, as an index (0 Regular, 1 Snapcast, 2 Mic only) ---
+  - id: mode_index
+    type: int
+    restore_value: no
+    initial_value: '1'
   # --- Ctrlable: predicted times this answer says "stop" ---
   - id: stop_mute_windows
     type: std::vector<float>
@@ -447,13 +442,15 @@ switch:
   # that sits far under the room's own audio. If it is still audible up close,
   # the honest fix is unwiring the announcement pipeline from the mixer at
   # compile time -- which costs the ability to switch it at all.
+  #
+  # Set by "Device mode" (Regular = ON), so it is internal: two controls for one
+  # choice would disagree after the first reboot.
   - platform: template
     id: play_answers_locally
     name: "Play answers on this device"
-    icon: mdi:speaker-message
-    entity_category: config
+    internal: true
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: ALWAYS_OFF
     on_turn_on:
       - mixer_speaker.apply_ducking:
           id: announcement_mixing_input
@@ -679,6 +676,41 @@ interval:
           }
 
 script:
+  # --- Ctrlable: apply Device mode ---
+  - id: apply_device_mode
+    mode: queued
+    then:
+      - lambda: |-
+          id(mode_index) = (int) id(device_mode).active_index().value_or(1);
+          static const char *const NAMES[] = {"Regular", "Snapcast", "Mic only"};
+          ESP_LOGI("mode", "Device mode: %s", NAMES[id(mode_index) % 3]);
+      - if:
+          condition:
+            lambda: return id(mode_index) == 0;
+          then:
+            - switch.turn_on: play_answers_locally
+          else:
+            - switch.turn_off: play_answers_locally
+      - if:
+          condition:
+            lambda: return id(mode_index) == 2;
+          then:
+            - voice_assistant.stop:
+            - micro_wake_word.stop:
+            - switch.turn_on: rtp_service
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          else:
+            - switch.turn_off: rtp_service
+            - if:
+                condition:
+                  and:
+                    - voice_assistant.connected:
+                    - not:
+                        micro_wake_word.is_running:
+                then:
+                  - micro_wake_word.start:
+      - script.execute: control_leds
+
   # --- Ctrlable Snapcast routing -------------------------------------------
   # Hand the answer to the add-on. Uses the HA service rather than a direct POST
   # so the add-on URL and bearer token stay in the integration's config flow
@@ -1590,9 +1622,6 @@ speaker:
         timeout: never
       - id: media_mixing_input
         timeout: never
-      # The echo reference (rtp_mic). Started and stopped by rtp_mic itself.
-      - id: ref_mixing_input
-        timeout: 2s
 
   # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
   - platform: resampler
@@ -1721,14 +1750,18 @@ external_components:
   - source:
       type: git
       url: https://github.com/formatBCE/esphome
-      ref: respeaker_microphone
+      # PINNED. A branch name here is re-fetched on every compile (refresh: 0s),
+      # so upstream changes reached this device unannounced: on 2026-10-02/03
+      # the mic driver and the XVF routing changed under a yaml that had not.
+      # Move these on purpose, test, then commit the new SHA.
+      ref: 9f8c1d07dec4dd81d4b19d53621a63ede85391f1  # respeaker_microphone, 2026-09-27
     components:
       - i2s_audio
     refresh: 0s
   - source:
       type: git
       url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
-      ref: main
+      ref: 8115b7b3ce73da5c22d0edf83ac5ae3430dba940  # main, 2026-09-29 (pinned, see above)
     components:
       - respeaker_xvf3800
       - aic3104
@@ -1793,13 +1826,13 @@ micro_wake_word:
     # 0.94 measured rather than guessed. Replaces okay_nabu -- micro_wake_word
     # runs every model on every frame, so this keeps the CPU cost flat.
     #
-    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/hey_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/69e35f58eeede8899d531d8c8148bdfadc99009c/esphome/models/hey_maya.json
       id: hey_maya
     # Trained 2026-08-11 at 30000 samples: 4.8% miss at ZERO false accepts/hour
     # on the quantized streaming model. The 2000-sample first attempt missed 11%
     # and was never shipped. Cutoff 0.98 rather than hey_maya's 0.94 because
     # "okay" is a far commoner word in speech than "hey".
-    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/main/esphome/models/okay_maya.json
+    - model: https://raw.githubusercontent.com/Ctrlable/ha-ctrlable-snapcast-tts/69e35f58eeede8899d531d8c8148bdfadc99009c/esphome/models/okay_maya.json
       id: okay_maya
     - model: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/refs/heads/main/microwakeword/models/v2/kenobi.json
       id: kenobi
@@ -1953,6 +1986,32 @@ micro_wake_word:
                                   - lambda: id(respeaker).lock_beam();
 
 select:
+  # --- Ctrlable: what this device is for. One firmware, chosen at runtime ---
+  #
+  #   Regular   its own mic, its own wake word, answers on its own speaker.
+  #   Snapcast  the same, but answers play in the room through the Snapcast
+  #             TTS add-on (mapping in the hardware manager); speaker muted.
+  #   Mic only  a network mic for a voice assistant on the server. The wake
+  #             word and voice pipeline here are STOPPED (no CPU spent on
+  #             them); the mic streams when the hardware manager asks, and the
+  #             LED ring shows what that server assistant is doing.
+  #
+  # The streaming service is on only in Mic only, so the other two modes run
+  # none of it.
+  - platform: template
+    name: "Device mode"
+    id: device_mode
+    icon: mdi:account-voice
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Snapcast
+    options:
+      - Regular
+      - Snapcast
+      - Mic only
+    on_value:
+      - script.execute: apply_device_mode
   - platform: template
     name: "Wake word sensitivity"
     id: wake_word_sensitivity
@@ -2089,7 +2148,12 @@ voice_assistant:
         then:
           - switch.turn_off: mic_mute_switch
     - lambda: id(init_in_progress) = false;
-    - micro_wake_word.start:
+    # Mic only: the wake word runs on the server, not here.
+    - if:
+        condition:
+          lambda: return id(mode_index) != 2;
+        then:
+          - micro_wake_word.start:
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
     - script.execute: control_leds
   on_client_disconnected:

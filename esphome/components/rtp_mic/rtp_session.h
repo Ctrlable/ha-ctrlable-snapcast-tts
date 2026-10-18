@@ -16,7 +16,16 @@
 //   KEEPALIVE              -> OK ALIVE [ref=<udp>|ref=off]
 //   STOP                   -> OK STOPPED
 //   STATUS                 -> OK IDLE | OK STREAMING to=<ip>:<port> beam=<b>
+//   LED <state>            -> (no reply) the session owner drives the LED ring
 //   anything else          -> ERR bad-request
+//
+// LED is for Mic-only mode: the wake word and the pipeline run on the server,
+// so the ring can only show what the server says. No reply, by design -- the
+// manager sends these from its own thread while its main thread waits for the
+// "OK ALIVE" to its KEEPALIVE, and a reply would be read as that. A non-owner's
+// LED is dropped silently for the same reason. The state is a short word the
+// yaml maps to its LED scripts (idle, wake, listening, thinking, speaking,
+// error, ...); unknown words are the yaml's problem, not the protocol's.
 //
 // THE ECHO REFERENCE. `ref=<ms>` is the server OFFERING the room's mix back,
 // to be played into the XVF3800's reference input <ms> behind its arrival.
@@ -41,6 +50,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 namespace rtp_mic_core {
 
@@ -49,9 +59,12 @@ enum class Beam : uint8_t { ASR = 0, WAKEWORD = 1 };
 inline const char *beam_name(Beam b) { return b == Beam::WAKEWORD ? "wakeword" : "asr"; }
 
 struct Reply {
+  Reply() = default;
+  Reply(std::string l, bool c = false, bool ch = false) : line(std::move(l)), close(c), changed(ch) {}
   std::string line;        // sent back to the requester, without '\n'
   bool close{false};       // close this connection after replying
   bool changed{false};     // the streaming target changed; the caller re-reads the session
+  std::string led;         // LED state to show (owner's LED request); empty = none
 };
 
 struct Session {
@@ -70,6 +83,7 @@ class SessionTable {
  public:
   static constexpr uint32_t IDLE_TIMEOUT_MS = 30000;
   static constexpr long MAX_REF_DELAY_MS = 250;  // half the device's 512 ms jitter ring
+  static constexpr size_t MAX_LED_STATE = 24;
 
   // token: empty means no authentication (see the package's rtp_mic_token).
   explicit SessionTable(std::string token = "") : token_(std::move(token)) {}
@@ -106,6 +120,12 @@ class SessionTable {
         return {"OK STOPPED", false, true};
       }
       return {"ERR no-session"};
+    }
+    if (verb == "LED") {
+      Reply r;
+      if (this->owns_(conn) && !rest.empty() && rest.size() <= MAX_LED_STATE)
+        r.led = rest;
+      return r;
     }
     if (verb == "STATUS") {
       if (!this->session_.active)
