@@ -2,6 +2,7 @@
 // Pure logic of the rtp_mic component: no ESPHome, no lwIP, so the host test
 // (tests/rtp_mic/test_rtp_core.cpp) can execute exactly what runs on the device.
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -258,6 +259,8 @@ class RefJitterBuffer {
   static constexpr uint32_t TRIM_EVERY = 8000;     // samples between drift corrections
   static constexpr int32_t TRIM_DEADBAND = 16;     // 1 ms
   static constexpr uint32_t SETTLE_PACKETS = 1000;  // ~4 averaging time constants at 100 packets/s
+  static constexpr uint32_t RECENTER_FROM = 50;      // packets after the anchor: skip start-up bursts
+  static constexpr uint32_t RECENTER_AT = 350;       // mean of 300 packets (3 s)
 
   explicit RefJitterBuffer(uint32_t delay_samples = 960) : ring_(RING, 0) { this->set_delay(delay_samples); }
 
@@ -266,6 +269,14 @@ class RefJitterBuffer {
     this->reset();
   }
   uint32_t delay() const { return this->delay_; }
+  // Opt-in (the aec_mic room reference): a few seconds after each anchor,
+  // move playout so the delay counts from the MEAN arrival, not from the
+  // first packet's. Over Wi-Fi the first packet alone is up to tens of ms
+  // early or late, so the same setting gave the canceller a different
+  // alignment every time (2026-10-18: 15 ms set -> +26 ms, 30 ms -> -9 ms).
+  // The XVF path leaves it off: there the output must stay bit-contiguous.
+  void set_recenter(bool on) { this->recenter_ = on; }
+  uint32_t recenters() const { return this->recenters_; }
 
   void reset() {
     this->primed_ = false;
@@ -295,6 +306,14 @@ class RefJitterBuffer {
     const int32_t lead = static_cast<int32_t>(ts - this->play_ts_);
     this->lead_q8_ += (lead * 256 - this->lead_q8_) / 256;  // ~2.5 s average at 100 packets/s
     ++this->packets_;
+    // Every 300 packets (3 s) after the first 50, not just once: a resync on
+    // a Wi-Fi burst can land the anchor hundreds of ms off (2026-10-18:
+    // 376 ms, which one clamped correction only took to 248).
+    if (this->recenter_ && this->since_anchor_ >= RECENTER_FROM) {
+      this->lead_sum_ += lead;
+      if ((this->since_anchor_ + 1 - RECENTER_FROM) % (RECENTER_AT - RECENTER_FROM) == 0)
+        this->recenter_now_();
+    }
     if (++this->since_anchor_ == SETTLE_PACKETS)
       this->target_q8_ = this->lead_q8_;
   }
@@ -362,7 +381,26 @@ class RefJitterBuffer {
     this->since_anchor_ = 0;
     this->target_q8_ = this->lead_q8_;
     this->primed_ = true;
+    this->lead_sum_ = 0;
     ++this->resyncs_;
+  }
+
+  void recenter_now_() {
+    int32_t shift = static_cast<int32_t>(this->lead_sum_ / static_cast<int64_t>(RECENTER_AT - RECENTER_FROM)) -
+                          static_cast<int32_t>(this->delay_);
+    this->lead_sum_ = 0;
+    if (shift > -48 && shift < 48)
+      return;  // within 3 ms: leave it (the drift trim holds it from here)
+    // Keep the new playout inside the ring: a lead past RING/2 can't be held.
+    shift = std::max<int32_t>(-static_cast<int32_t>(RING / 2), std::min<int32_t>(shift, RING / 2));
+    if (shift > 0) {  // buffered more than asked: play newer samples, drop the ones in between
+      for (int32_t k = 0; k < shift; ++k)
+        this->ring_[(this->play_ts_ + static_cast<uint32_t>(k)) & MASK] = 0;
+    }
+    this->play_ts_ += static_cast<uint32_t>(shift);  // negative: back up (replays silence)
+    this->lead_q8_ -= shift * 256;
+    this->target_q8_ = this->lead_q8_;
+    ++this->recenters_;
   }
 
   std::vector<int16_t> ring_;
@@ -376,6 +414,9 @@ class RefJitterBuffer {
   int32_t target_q8_{0};
   uint32_t since_anchor_{0};
   uint32_t packets_{0}, late_{0}, resyncs_{0}, trims_{0};
+  bool recenter_{false};
+  int64_t lead_sum_{0};
+  uint32_t recenters_{0};
 };
 
 }  // namespace rtp_mic_core

@@ -139,6 +139,28 @@ int main() {
   }
 
   int real_failures = failures;
+  // PlaybackGate: the canceller runs while the speaker plays and for the echo
+  // tail after it, never while the device is quiet.
+  {
+    using esphome::duplex_i2s::PlaybackGate;
+    PlaybackGate g(64, 9600);  // 600 ms at 16 kHz
+    std::vector<int16_t> quiet(512, 0), dither(512, 0), loud(512, 0);
+    for (size_t i = 0; i < 512; i++) {
+      dither[i] = (int16_t) ((i % 7) * 9 - 27);  // |x| <= 27: DAC noise, not sound
+      loud[i] = (int16_t) (3000 * std::sin(i * 0.2));
+    }
+    CHECK(!g.feed(quiet.data(), 512), "gate on before anything played");
+    CHECK(!g.feed(dither.data(), 512), "gate opened on dither");
+    CHECK(g.feed(loud.data(), 512), "gate closed while the speaker plays");
+    int open_chunks = 0;
+    for (int k = 0; k < 40; k++)
+      open_chunks += g.feed(quiet.data(), 512) ? 1 : 0;
+    // 9600 / 512 = 18.75: open for the first 18 quiet chunks, then closed.
+    CHECK(open_chunks == 18, "echo tail held %d chunks, want 18 (600 ms)", open_chunks);
+    CHECK(!g.feed(quiet.data(), 512), "gate stuck open after the tail");
+    CHECK(g.feed(loud.data(), 512), "gate did not reopen on the next sound");
+  }
+
   // The checks must be able to catch an unfiltered decimator.
   int naive_failures = run_filter_checks<Naive>("Naive (must FAIL)");
   failures = real_failures;

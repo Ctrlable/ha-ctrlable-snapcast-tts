@@ -175,6 +175,10 @@ class DuplexMicrophone : public Component, public microphone::Microphone, public
   void set_afe(const std::string &format) { this->afe_format_ = format; }
   // Logs the 16 kHz signal's RMS / peak / clipped samples once a second.
   void set_level_log(bool on) { this->level_log_ = on; }
+  // Run the canceller only while the speaker plays (and 600 ms after).
+  void set_aec_only_while_playing(bool on) {
+    if (on) this->aec_gate_.reset(new PlaybackGate(64, 9600));
+  }
 
  protected:
   static void rx_task_(void *arg);
@@ -207,6 +211,7 @@ class DuplexMicrophone : public Component, public microphone::Microphone, public
   std::string cap_host_;
   uint16_t cap_port_{0};
   bool level_log_{false};
+  std::unique_ptr<PlaybackGate> aec_gate_;
   Decimator3 ref_decim_;
 #ifdef USE_DUPLEX_I2S_AEC
   aec_handle_t *aec_{nullptr};

@@ -96,6 +96,9 @@ substitutions:
   # sensitivity.
   okay_nabu_model_file: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
   stop_model_file: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+  # Regular mode only: the chimes play on this device.
+  wake_word_triggered_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+  error_cloud_expired_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
   okay_computer_model_file: https://github.com/esphome/micro-wake-word-models/raw/main/models/v2/experiments/okay_computer.json
   hey_home_assistant_model_file: https://github.com/esphome/micro-wake-word-models/raw/main/models/v2/experiments/hey_home_assistant.json
 
@@ -214,6 +217,16 @@ psram:
 api:
   encryption:
     key: /5jWV/v8fsARJGhs5Hy9VyD5Ljm1rCFm48elbU56bbc=
+  # Diagnostic: record mic / speaker reference / mic after the canceller to
+  # host:port (raw int16 x3 at 16 kHz; tools/duplex_i2s/). Idle otherwise.
+  actions:
+    - action: capture_audio
+      variables:
+        seconds: int
+        host: string
+        port: int
+      then:
+        - lambda: id(i2s_mic).capture(seconds, host, port);
 
   on_client_connected:
     - script.execute: draw_display
@@ -227,6 +240,9 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # Light sleep batches incoming packets: a quarter of the room echo
+  # reference arrived too late to use (2026-10-18). Same as the 1.85C.
+  power_save_mode: none
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
@@ -249,6 +265,30 @@ logger:
 #
 # Acts only on a CHANGE, so a reply that never says it costs two calls in total.
 interval:
+  # --- Ctrlable: wake word watchdog ---
+  # micro_wake_word.stop() only flags a stop, and the engine still reports
+  # running until its loop acts on it, so a start() in that window is dropped
+  # ("Wake word detection is already running") and the stop then lands: the
+  # device is deaf until reboot. With the room echo canceller loading the CPU
+  # the window got hit every few exchanges (2026-10-18). Restart it when it
+  # should be running and has been off for two checks in a row.
+  - interval: 1s
+    then:
+      - lambda: |-
+          static int off = 0;
+          const bool should = !id(init_in_progress) && id(mode_index) != 2 &&
+              id(wake_word_engine_location).current_option() == "On device" &&
+              !id(mute).state && id(va).get_api_connection() != nullptr && !id(va).is_running() &&
+              (id(responding) ||
+               (id(va_media_player).state != media_player::MEDIA_PLAYER_STATE_PLAYING &&
+                id(va_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING));
+          if (!should || id(mww).is_running()) { off = 0; return; }
+          if (++off >= 2) {
+            ESP_LOGW("mww_watchdog", "wake word engine was off while it should listen; restarting it");
+            id(va).set_use_wake_word(false);
+            id(mww).start();
+            off = 0;
+          }
   # --- Ctrlable: Mic only -- redraw when the server's session comes or goes ---
   # Its words arrive through rtp_mic on_led, but a session starting or ending
   # is not an event anything else sees. Only on a change, so it never keeps
@@ -297,7 +337,14 @@ interval:
             - logger.log: "stop word disarmed: the answer is about to say it"
 
 globals:
-  # --- Ctrlable: Device mode, as an index (1 Snapcast, 2 Mic only) ---
+  # --- Ctrlable: which wake models were on before a Regular-mode answer ---
+  # During a local answer only "stop" runs (the canceller needs the CPU, and
+  # every other word is ignored while responding anyway); restored after.
+  - id: paused_wake_models
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # --- Ctrlable: Device mode, as an index (0 Regular, 1 Snapcast, 2 Mic only) ---
   - id: mode_index
     type: int
     restore_value: no
@@ -361,43 +408,22 @@ globals:
     restore_value: no
     initial_value: '""'
 
-i2s_audio:
-  - id: i2s_audio_bus
-    i2s_lrclk_pin: GPIO33
-    i2s_bclk_pin: GPIO34
-    i2s_mclk_pin:
-      number: GPIO0
-      ignore_strapping_warning: true
-
-  # --- Ctrlable Snapcast routing: the silent sink -------------------------
-  #
-  # A second I2S controller (the S3 has two) wired to pins with nothing on the
-  # other end. The announcement pipeline plays into this, which buys two things
-  # that were previously mutually exclusive:
-  #
-  #   1. HA's assist_satellite leaves `responding`. That state is cleared by an
-  #      announcement-finished report, which ESPHome only sends when
-  #      voice_assistant owns a media_player. Before this, choosing silence meant
-  #      the entity sat in `responding` forever -- confirmed 2026-08-09, entity
-  #      last_changed pinned to the previous exchange's TTS start.
-  #   2. It is genuinely inaudible. Not muted -- muting the announcement pipeline
-  #      does not work (measured: "PLAYING / Muted: YES" then full-volume audio)
-  #      and the aw88298's set_mute_off() is a no-op that strands the DAC. The
-  #      bits are simply clocked out to unconnected pads.
-  #
-  # It also fixes something unrelated and long-standing: the mic and the real
-  # speaker shared one bus, so every wake word logged
-  #     [E][i2s_audio.speaker.std] Parent bus is busy
-  #     [E][i2s_audio.speaker] Driver failed to start; retrying in 1 second
-  # and lost a second to the retry. Separate controllers, no contention.
-  #
-  # PIN CHOICE: Port B (G8/G9) and Port C (G17). Grove headers, so they are
-  # guaranteed not to be internally wired to anything on the CoreS3 -- unlike the
-  # free-looking GPIOs in the 5-21 range, several of which land on the camera.
-  # DO NOT plug a Grove device into Port B or Port C on this unit.
-  - id: i2s_null_bus
-    i2s_lrclk_pin: GPIO9
-    i2s_bclk_pin: GPIO8
+# --- Ctrlable: mic and speaker on ONE full-duplex port ---
+# The ES7210 (mic) and the AW88298 (speaker) share BCLK/LRCLK/MCLK, and
+# ESPHome's i2s_audio lets only one of them hold the bus, so the mic was OFF
+# whenever this device made a sound -- no "stop" during a Regular-mode answer.
+# duplex_i2s runs both on one 48 kHz clock (as on the Waveshare 1.85C) and the
+# mic side cancels the device's own speaker (exact samples, no network) only
+# while it plays. (The silent second bus on Port B/C is gone: gate_speaker
+# swallows the audio in Snapcast / Mic only without driving any pins.)
+duplex_i2s:
+  id: duplex_bus
+  mclk_pin: GPIO0
+  bclk_pin: GPIO34
+  lrclk_pin: GPIO33
+  dout_pin: GPIO13
+  din_pin: GPIO14
+  sample_rate: 48000
 
 i2c:
   - id: bsp_bus
@@ -421,10 +447,41 @@ external_components:
   - source:
       type: local
       path: components
-    components: [ctrlable_faces, rtp_mic]
+    components: [ctrlable_faces, rtp_mic, gate_speaker, duplex_i2s]
 
 # PMU
+# --- Ctrlable: diagnostics for "it stopped waking up" (2026-10-18) ---
+debug:
+  update_interval: 30s
+
 sensor:
+  - platform: debug
+    free:
+      name: "Heap free"
+      entity_category: diagnostic
+    block:
+      name: "Heap largest block"
+      entity_category: diagnostic
+    loop_time:
+      name: "Loop time"
+      entity_category: diagnostic
+    psram:
+      name: "PSRAM free"
+      entity_category: diagnostic
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    entity_category: diagnostic
+    update_interval: 30s
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+    update_interval: 30s
+  - platform: template
+    name: "PSRAM largest block"
+    entity_category: diagnostic
+    unit_of_measurement: B
+    update_interval: 30s
+    lambda: return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
   - platform: axp2101
     id: axp2101_sensor
     battery_level:
@@ -488,6 +545,14 @@ light:
 # some aw9523b inputs (handle interrupts)
 # and other binary sensors
 binary_sensor:
+  - platform: template
+    name: "Answer in progress"
+    entity_category: diagnostic
+    lambda: return id(responding);
+  - platform: template
+    name: "Wake word engine running"
+    entity_category: diagnostic
+    lambda: return id(mww).is_running();
   - platform: gpio
     name: "ES_INT P0_3"
     pin:
@@ -533,7 +598,9 @@ audio_adc:
     id: es7210_adc
     i2c_id: bsp_bus
     bits_per_sample: 16bit
-    sample_rate: 16000
+    # The bus clock is shared with the speaker (duplex_i2s): 48 kHz both ways,
+    # the mic side decimates to 16 kHz.
+    sample_rate: 48000
     mic_gain: 36
 
 audio_dac:
@@ -543,54 +610,63 @@ audio_dac:
     sample_rate: 48000
 
 microphone:
-  - platform: i2s_audio
+  - platform: duplex_i2s
     id: i2s_mic
-    i2s_din_pin: GPIO14
-    adc_type: external
-    sample_rate: 16000
-    bits_per_sample: 16bit 
-    i2s_audio_id: i2s_audio_bus
+    # The slot the i2s_audio mic read before (its default, right).
+    slot: right
+    # Cancel this device's own speaker -- only while it plays (Regular-mode
+    # answers and chimes), so the idle wake word keeps the whole CPU. In
+    # Snapcast / Mic only the speaker is silent and this never runs.
+    reference_slot: speaker
+    echo_cancellation: true
+    aec_mode: sr_low_cost
+    aec_nlp: normal
+    aec_only_while_playing: true
     # The listening face follows the real mic level.
     on_data:
       - lambda: id(faces).feed_audio(x);
+
 
 speaker:
   # The real speaker. Still defined -- deleting it would orphan the aw88298 and
   # make going back to local audio a rewrite rather than a one-line change -- but
   # nothing routes to it any more.
-  - platform: i2s_audio
-    i2s_audio_id: i2s_audio_bus
+  - platform: duplex_i2s
     id: i2s_speaker
-    dac_type: external
-    i2s_dout_pin: GPIO13
     audio_dac: aw88298_dac
 
-  # --- Ctrlable Snapcast routing: the silent sink -------------------------
-  # No audio_dac: there is no DAC on the far end, and that is the point.
-  - platform: i2s_audio
-    i2s_audio_id: i2s_null_bus
-    id: null_speaker
-    dac_type: external
-    i2s_dout_pin: GPIO17
+  # --- Ctrlable: the speaker the media player actually plays to ---
+  # Regular: passthrough to i2s_speaker -- the answer and the chimes play here,
+  # and the mic (same bus) pauses for them. Snapcast / Mic only: the audio is
+  # taken at real-time pace and dropped, so the bus is never touched and the
+  # announcement still lasts as long as the answer (HA leaves `responding`,
+  # the stop-word arming waits on it). This replaces the silent second I2S bus
+  # (G8/G9/G17), which did the same job for Snapcast only. As on the AtomS3R.
+  - platform: gate_speaker
+    id: answer_speaker
+    output: i2s_speaker
 
 media_player:
   - platform: speaker
     name: None
     id: va_media_player
-    # These no longer gate audibility -- the pipeline below goes nowhere, so
-    # local output is silent at any setting. The slider now has a different job:
-    # announce_and_wait forwards its 0-1 value to the add-on as a 0-100 snapclient
-    # volume, so this control governs how loud the reply is IN THE ROOM. Kept at
+    # Regular: the device's own loudness. Snapcast: answer_speaker swallows
+    # the audio, and announce_and_wait forwards this 0-1 value to the add-on as
+    # the 0-100 snapclient volume -- how loud the reply is IN THE ROOM. Kept at
     # full range for that reason.
     volume_min: 0.0
     volume_max: 1.0
     announcement_pipeline:
-      # Silent sink -- see the i2s_null_bus comment. Everything audible leaves
-      # this device over the network, not over I2S.
-      speaker: null_speaker
+      # Plays here in Regular, swallowed otherwise (see answer_speaker).
+      speaker: answer_speaker
       format: FLAC
       sample_rate: 48000
       num_channels: 1
+    files:
+      - id: wake_word_triggered_sound
+        file: ${wake_word_triggered_sound_file}
+      - id: error_cloud_expired
+        file: ${error_cloud_expired_file}
     on_announcement:
       # Stop the wake word (mWW or VA) if the mic is capturing -- but NOT for our
       # own reply.
@@ -605,7 +681,7 @@ media_player:
       - if:
           condition:
             and:
-              - microphone.is_capturing:
+              - microphone.is_capturing: i2s_mic
               - lambda: return !id(responding);
           then:
             - script.execute: stop_wake_word
@@ -649,6 +725,10 @@ media_player:
 
 micro_wake_word:
   id: mww
+  # The raw mic. On-device echo cancelling against the room (aec_mic, kept in
+  # esphome/components) worked -- ~30 dB off the music -- but left the CoreS3
+  # too short of CPU: sluggish wakes and a deaf wake word (2026-10-18). Echo
+  # cancelling is Mic only mode's job, on beta.
   microphone: i2s_mic
   stop_after_detection: false
   models:
@@ -735,12 +815,17 @@ micro_wake_word:
           - lambda: id(last_wake_ms) = millis();
           # The sound is in the room, not on this device, so this is the call that
           # actually silences it. media_player.stop only clears the local (silent)
-          # pipeline and the assist_satellite state.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.stop
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
+          # pipeline and the assist_satellite state. (Regular: the local stop is
+          # the whole job.)
+          - if:
+              condition:
+                lambda: return id(mode_index) != 0;
+              then:
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.stop
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
           - media_player.stop:
               announcement: true
           - script.execute: finish_response
@@ -766,34 +851,55 @@ micro_wake_word:
           - lambda: id(voice_assistant_phase) = ${voice_assist_awake_phase_id};
           - script.execute: draw_display
 
-          # --- Ctrlable Snapcast routing ---
-          # The chime goes to the room, not to this box, and nothing is played locally
-          # at all any more.
-          #
-          # Playing it locally (silently, for its timing) is what produced the mute
-          # face on every wake word: an announcement starting while voice_assistant is
-          # not yet running is indistinguishable, to on_announcement, from the user
-          # starting media playback -- so it drew the muted page, then the idle page
-          # when the silent clip ended, and only then the listening page. Removing the
-          # local playback removes all three frames; the gap is now an explicit delay.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.chime
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
-                chime: wake
-                volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
-
-          # Nothing of ours is playing, but a previous reply might still be draining.
-          - wait_until:
-              - and:
-                  - not:
+          - if:
+              condition:
+                lambda: return id(mode_index) == 0;
+              then:
+                # Regular: the chime plays HERE. It needs the bus, so play_sound
+                # stops the wake word first; the mic opens once it is done.
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: !lambda return id(wake_word_triggered_sound);
+                - wait_until:
+                    condition:
                       media_player.is_announcing:
-                  - not:
-                      speaker.is_playing: null_speaker
+                    timeout: 0.5s
+                - wait_until:
+                    - and:
+                        - not:
+                            media_player.is_announcing:
+                        - not:
+                            speaker.is_playing: answer_speaker
+              else:
+                # --- Ctrlable Snapcast routing ---
+                # The chime goes to the room, not to this box, and nothing is played locally
+                # at all any more.
+                #
+                # Playing it locally (silently, for its timing) is what produced the mute
+                # face on every wake word: an announcement starting while voice_assistant is
+                # not yet running is indistinguishable, to on_announcement, from the user
+                # starting media playback -- so it drew the muted page, then the idle page
+                # when the silent clip ended, and only then the listening page. Removing the
+                # local playback removes all three frames; the gap is now an explicit delay.
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.chime
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
+                      chime: wake
+                      volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
 
-          # Hold the mic closed until the room's chime has come and gone.
-          - delay: ${chime_lead_in}
+                # Nothing of ours is playing, but a previous reply might still be draining.
+                - wait_until:
+                    - and:
+                        - not:
+                            media_player.is_announcing:
+                        - not:
+                            speaker.is_playing: answer_speaker
+
+                # Hold the mic closed until the room's chime has come and gone.
+                - delay: ${chime_lead_in}
 
           - voice_assistant.start:
               wake_word: !lambda return wake_word;
@@ -828,11 +934,16 @@ voice_assistant:
     # FIRST turn, but a continued conversation ("...and which room?") reopens
     # the mic with NO chime, so nothing held the duck and music played at full
     # volume straight into the microphone. Idempotent; the answer releases it.
-    - homeassistant.service:
-        service: ctrlable_snapcast_tts.hold
-        data:
-          satellite_id: !lambda return App.get_name();
-          wake_word: !lambda return id(current_wake_word);
+    # Regular has no room to hold.
+    - if:
+        condition:
+          lambda: return id(mode_index) != 0;
+        then:
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.hold
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - text_sensor.template.publish:
         id: text_request
@@ -849,13 +960,18 @@ voice_assistant:
     # the zone's lock for ~1.5s (1.12s of audio + a shortened drain); intent
     # resolution has been measured at 2-9s, so it clears well before the answer
     # wants the zone.
-    - homeassistant.service:
-        service: ctrlable_snapcast_tts.chime
-        data:
-          satellite_id: !lambda return App.get_name();
-          wake_word: !lambda return id(current_wake_word);
-          chime: thinking
-          volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
+    # Regular mode has no thinking chime, as upstream.
+    - if:
+        condition:
+          lambda: return id(mode_index) != 0;
+        then:
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.chime
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
+                chime: thinking
+                volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
   on_stt_end:
     - text_sensor.template.publish:
         id: text_request
@@ -882,6 +998,24 @@ voice_assistant:
     - text_sensor.template.publish:
         id: text_response
         state: !lambda return x;
+    # Regular: the answer plays HERE, and the mic keeps listening through it
+    # (duplex_i2s + echo cancelling) so "stop" can end it -- the same
+    # responding / arm_stop_word path as Snapcast, ended by the local
+    # announcement finishing instead of by the room.
+    - if:
+        condition:
+          lambda: return id(mode_index) == 0;
+        then:
+          - lambda: |-
+              id(responding) = true;
+              micro_wake_word::WakeWordModel *m[] = {id(hey_maya), id(okay_maya), id(hey_jarvis),
+                  id(hey_mycroft), id(alexa), id(okay_computer), id(hey_home_assistant)};
+              uint32_t mask = 0;
+              for (int i = 0; i < 7; i++)
+                if (m[i]->is_enabled()) { mask |= 1u << i; m[i]->disable(); }
+              id(paused_wake_models) = mask;
+          - script.execute: arm_stop_word
+          - script.execute: regular_answer_wait
     - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
     - script.execute: draw_display
   # --- Ctrlable Snapcast routing ---
@@ -890,7 +1024,7 @@ voice_assistant:
   on_intent_progress:
     - if:
         condition:
-          lambda: return !x.empty() && x != id(last_tts_url);
+          lambda: return id(mode_index) != 0 && !x.empty() && x != id(last_tts_url);
         then:
           - lambda: id(last_tts_url) = x;
           - script.execute: announce_and_wait
@@ -898,7 +1032,7 @@ voice_assistant:
   on_tts_end:
     - if:
         condition:
-          lambda: return !x.empty() && x != id(last_tts_url);
+          lambda: return id(mode_index) != 0 && !x.empty() && x != id(last_tts_url);
         then:
           - lambda: id(last_tts_url) = x;
           - script.execute: announce_and_wait
@@ -918,11 +1052,15 @@ voice_assistant:
           # a false wake or an STT no-text would otherwise leave music ducked until
           # its watchdog fires. Unconditional and idempotent -- releasing a zone
           # that is not held is a no-op in the add-on.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.release
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
+          - if:
+              condition:
+                lambda: return id(mode_index) != 0;
+              then:
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.release
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
           - script.execute: end_exchange_locally
   on_error:
     # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
@@ -933,11 +1071,15 @@ voice_assistant:
     # a false wake or an STT no-text would otherwise leave music ducked until
     # its watchdog fires. Unconditional and idempotent -- releasing a zone
     # that is not held is a no-op in the add-on.
-    - homeassistant.service:
-        service: ctrlable_snapcast_tts.release
-        data:
-          satellite_id: !lambda return App.get_name();
-          wake_word: !lambda return id(current_wake_word);
+    - if:
+        condition:
+          lambda: return id(mode_index) != 0;
+        then:
+          - homeassistant.service:
+              service: ctrlable_snapcast_tts.release
+              data:
+                satellite_id: !lambda return App.get_name();
+                wake_word: !lambda return id(current_wake_word);
     - if:
         condition:
           and:
@@ -963,13 +1105,22 @@ voice_assistant:
           # --- Ctrlable Snapcast routing ---
           # Rare path, but the local speaker is silent now, so without this the
           # user gets no audible signal at all that auth expired.
-          - homeassistant.service:
-              service: ctrlable_snapcast_tts.chime
-              data:
-                satellite_id: !lambda return App.get_name();
-                wake_word: !lambda return id(current_wake_word);
-                chime: error
-                volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
+          - if:
+              condition:
+                lambda: return id(mode_index) == 0;
+              then:
+                - script.execute:
+                    id: play_sound
+                    priority: true
+                    sound_file: !lambda return id(error_cloud_expired);
+              else:
+                - homeassistant.service:
+                    service: ctrlable_snapcast_tts.chime
+                    data:
+                      satellite_id: !lambda return App.get_name();
+                      wake_word: !lambda return id(current_wake_word);
+                      chime: error
+                      volume: !lambda return to_string((int)(id(va_media_player).volume * 100));
           - script.execute: draw_display
 
   on_client_connected:
@@ -1043,12 +1194,12 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_off:
-        - microphone.unmute:
+        - microphone.unmute: i2s_mic
         - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
         - script.execute: draw_display
         
     on_turn_on:
-        - microphone.mute:
+        - microphone.mute: i2s_mic
         - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
         - script.execute: draw_display
 
@@ -1068,11 +1219,32 @@ select:
     optimistic: true
     restore_value: true
     initial_option: Snapcast
+    # Same order and indexes as the AtomS3R and the Waveshare boards.
     options:
+      - Regular
       - Snapcast
       - Mic only
     on_value:
       - script.execute: apply_device_mode
+  # Turn the picture in 90-degree steps, for a screen mounted on its side or
+  # upside down. The panel rotates in hardware (MADCTL): no extra CPU or memory.
+  - platform: template
+    name: "Screen rotation"
+    id: screen_rotation
+    icon: mdi:screen-rotation
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "0°"
+    options:
+      - "0°"
+      - "90°"
+      - "180°"
+      - "270°"
+    on_value:
+      - lambda: |-
+          id(m5cores3_lcd).set_rotation((display::DisplayRotation) (i * 90));
+          id(faces).redraw();
   # --- Ctrlable faces: which design the screen draws ---
   - platform: template
     name: "Screen style"
@@ -1197,10 +1369,11 @@ display:
     # transfer: no flashing, nothing stale from the panel's own buffer.
     lambda: |-
       id(faces).draw(it, [&](display::Display &d) {
-        // Mute button. Touch zone is x>=250, y>=170 -- see touchscreen.on_touch.
+        // Mute button, bottom-right whatever the rotation. Touch zone: the 70 px
+        // corner around it -- see touchscreen.on_touch.
         int st = id(faces).get_step();
         if (st == 1 || st == 3 || st == 6)
-          d.print(283, 200, id(mdi_icon_36), Color(0x8b, 0x9b, 0xa2), TextAlign::CENTER,
+          d.print(d.get_width() - 37, d.get_height() - 40, id(mdi_icon_36), Color(0x8b, 0x9b, 0xa2), TextAlign::CENTER,
                   id(mute).state ? "\U000F036D" : "\U000F036C", Color::BLACK);
       });
 
@@ -1211,6 +1384,10 @@ ctrlable_faces:
   # The mute button owns the bottom-right corner.
   logo_left: true
   font: face_label_font
+  # Starts static; apply_device_mode sets it per mode. With an echo canceller
+  # on top, animated faces starved micro_wake_word during every exchange --
+  # ring overflows ~5/s at full rate and still ~2/s at half rate (2026-10-18).
+  frame_scale: 0
 
 touchscreen:
   - platform: ft63x6
@@ -1236,14 +1413,30 @@ touchscreen:
           then:
             - logger.log: "tap: stopping the answer"
             - lambda: id(last_wake_ms) = millis();
-            - homeassistant.service:
-                service: ctrlable_snapcast_tts.stop
-                data:
-                  satellite_id: !lambda return App.get_name();
-                  wake_word: !lambda return id(current_wake_word);
+            - if:
+                condition:
+                  lambda: return id(mode_index) != 0;
+                then:
+                  - homeassistant.service:
+                      service: ctrlable_snapcast_tts.stop
+                      data:
+                        satellite_id: !lambda return App.get_name();
+                        wake_word: !lambda return id(current_wake_word);
             - media_player.stop:
                 announcement: true
             - script.execute: finish_response
+            - script.execute: screen_wake
+      # Regular: the answer is the local announcement; a tap stops it.
+      - if:
+          condition:
+            and:
+              - lambda: return id(mode_index) == 0 && !id(responding);
+              - media_player.is_announcing:
+          then:
+            - logger.log: "tap: stopping the local answer"
+            - lambda: id(last_wake_ms) = millis();
+            - media_player.stop:
+                announcement: true
             - script.execute: screen_wake
       # A touch on a sleeping screen only wakes it. Waking and acting on the
       # same tap means you cannot see what you are about to press.
@@ -1259,7 +1452,19 @@ touchscreen:
             - if:
                 condition:
                   lambda: |-
-                    return touch.x >= 250 && touch.y >= 170
+                    // The touch panel does not turn with the screen: map its native
+                    // 320x240 point into the rotated picture (ESPHome's convention for
+                    // DisplayRotation), then test the bottom-right 70 px corner.
+                    int tx = touch.x_raw, ty = touch.y_raw, x = tx, y = ty;
+                    switch (id(m5cores3_lcd).get_rotation()) {
+                      case display::DISPLAY_ROTATION_90_DEGREES: x = ty; y = 319 - tx; break;
+                      case display::DISPLAY_ROTATION_180_DEGREES: x = 319 - tx; y = 239 - ty; break;
+                      case display::DISPLAY_ROTATION_270_DEGREES: x = 239 - ty; y = tx; break;
+                      default: break;
+                    }
+                    ESP_LOGD("touch", "native %d,%d -> screen %d,%d", tx, ty, x, y);
+                    int w = id(m5cores3_lcd).get_width(), h = id(m5cores3_lcd).get_height();
+                    return x >= w - 70 && y >= h - 70
                         && (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}
                          || id(voice_assistant_phase) == ${voice_assist_muted_phase_id}
                          || id(voice_assistant_phase) == ${voice_assist_listening_phase_id});
@@ -1283,7 +1488,7 @@ script:
             - not:
                 media_player.is_announcing:
             - not:
-                speaker.is_playing: null_speaker
+                speaker.is_playing: answer_speaker
     # Restart only mWW if enabled; streaming wake words automatically restart
     - if:
         condition:
@@ -1397,6 +1602,14 @@ script:
       # during ordinary room noise, with no reply to cancel.
       - micro_wake_word.disable_model: stop
       - lambda: |-
+          // Regular: give back the wake models paused for the answer.
+          if (id(paused_wake_models)) {
+            micro_wake_word::WakeWordModel *m[] = {id(hey_maya), id(okay_maya), id(hey_jarvis),
+                id(hey_mycroft), id(alexa), id(okay_computer), id(hey_home_assistant)};
+            for (int i = 0; i < 7; i++)
+              if (id(paused_wake_models) & (1u << i)) m[i]->enable();
+            id(paused_wake_models) = 0;
+          }
           id(responding) = false;
           id(last_tts_url) = "";
           id(current_wake_word) = "";
@@ -1433,13 +1646,67 @@ script:
           id(faces).set_step(st);
   # Starts either mWW or the streaming wake word, depending on the configured location
   # --- Ctrlable: Device mode (see the select) ---
+  # Regular: the exchange ends when the local answer has finished playing.
+  - id: regular_answer_wait
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+          timeout: 15s
+      - wait_until:
+          - and:
+              - not:
+                  media_player.is_announcing:
+              - not:
+                  speaker.is_playing: answer_speaker
+      - if:
+          condition:
+            lambda: return id(responding) && id(mode_index) == 0;
+          then:
+            - script.execute: finish_response
+
+  # Regular mode's local sounds (from the AtomS3R).
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: "audio::AudioFile*"
+    then:
+      - lambda: |-
+          // Only stop what is actually playing: a stop sent to an idle player
+          // is remembered and hard-stops the NEXT sound ~0.2 s in (2026-10-17).
+          auto ps = id(va_media_player).state;
+          if (priority && (ps == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING ||
+                           ps == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING)) {
+            id(va_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+              .set_announcement(true)
+              .perform();
+          }
+          if ((id(va_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING) || priority) {
+            id(va_media_player)->play_file(sound_file, true, false);
+          }
+      - script.execute: stop_wake_word
+
   - id: apply_device_mode
     mode: queued
     then:
       - lambda: |-
-          // Same indexes as the AtomS3R and the Waveshare: 1 Snapcast, 2 Mic only.
-          id(mode_index) = id(device_mode).active_index().value_or(0) == 1 ? 2 : 1;
-          ESP_LOGI("mode", "Device mode: %s", id(mode_index) == 2 ? "Mic only" : "Snapcast");
+          // 0 Regular, 1 Snapcast, 2 Mic only -- as the AtomS3R and the Waveshare.
+          id(mode_index) = (int) id(device_mode).active_index().value_or(1);
+          static const char *const NAMES[] = {"Regular", "Snapcast", "Mic only"};
+          ESP_LOGI("mode", "Device mode: %s", NAMES[id(mode_index) % 3]);
+          id(answer_speaker).set_passthrough(id(mode_index) == 0);
+          {
+            auto r = id(screen_rotation).active_index().value_or(0);
+            id(m5cores3_lcd).set_rotation((display::DisplayRotation) (r * 90));
+            id(faces).redraw();
+          }
+          // Animate only where nothing else needs the CPU: Regular runs the
+          // echo canceller and the stop word during every answer, so it stays
+          // static; Snapcast (no canceller) and Mic only (no wake word) animate.
+          id(faces).set_frame_scale(id(mode_index) == 0 ? 0 : 1);
       - if:
           condition:
             lambda: return id(mode_index) == 2;
@@ -1571,6 +1838,20 @@ font:
       - "\U000F036D" # mdi:microphone-off
 
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Last reset reason"
+      entity_category: diagnostic
+  # Which access point it is on: an ESP32 keeps the AP it joined at boot, even
+  # with a much closer one on the same SSID (Mic only gaps to ~230 ms 8 ft from
+  # an AP, 2026-10-18).
+  - platform: wifi_info
+    bssid:
+      name: "Wi-Fi access point"
+      entity_category: diagnostic
+    ssid:
+      name: "Wi-Fi network"
+      entity_category: diagnostic
   # --- Ctrlable Snapcast routing ---
   # ONE entity shared by every satellite; its state lists whoever is currently
   # announcing. Each device recognises itself at runtime via App.get_name(),

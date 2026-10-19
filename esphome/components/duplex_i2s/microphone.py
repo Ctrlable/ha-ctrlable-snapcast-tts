@@ -63,6 +63,9 @@ CONFIG_SCHEMA = cv.All(
             # reference): one letter per slot, M mic / R reference / N unused.
             # Replaces echo_cancellation.
             cv.Optional(CONF_FRONT_END): cv.All(cv.string, cv.Length(min=3, max=4)),
+            # Run the canceller only while the speaker plays (and 600 ms after):
+            # idle, the mic passes through and the CPU stays with the wake word.
+            cv.Optional("aec_only_while_playing", default=False): cv.boolean,
             # Diagnostic: RMS / peak / clipping once a second in the log.
             cv.Optional(CONF_LEVEL_LOG, default=False): cv.boolean,
         }
@@ -95,3 +98,5 @@ async def to_code(config):
         cg.add(var.set_aec_nlp(AEC_NLP[config[CONF_AEC_NLP]]))
         esp32.add_idf_component(name="espressif/esp-sr", ref="2.5.5")
     cg.add(var.set_level_log(config[CONF_LEVEL_LOG]))
+    if config["aec_only_while_playing"]:
+        cg.add(var.set_aec_only_while_playing(True))

@@ -245,6 +245,67 @@ int main() {
     CHECK(!jb.primed(), "unprimed after a second of nothing");
   }
 
+  // 7. Recenter (aec_mic): the delay must count from the MEAN arrival, not
+  //    from whichever packet happened to anchor it. Same network (0..40 ms
+  //    per packet), two start-ups: A anchors on whatever arrives first (an
+  //    early packet); B starts with a stall, so everything sent in the first
+  //    37.5 ms arrives in one burst and the anchor packet is 37.5 ms late.
+  //    Recentered, A and B must play at the same delay; plain, they differ.
+  {
+    auto played_delay_ms = [&](bool recenter, uint32_t stall, uint32_t *recenters) {
+      const uint32_t D = 480;  // 30 ms
+      RefJitterBuffer jb(D);
+      jb.set_recenter(recenter);
+      std::srand(7);
+      struct Pending { uint32_t due, ts; };
+      std::vector<Pending> q;
+      long sum = 0, n = 0;
+      for (uint32_t now = 0; now < 16000 * 15; ++now) {
+        if (now % 160 == 0) {
+          uint32_t due = now + static_cast<uint32_t>(std::rand() % 640);
+          if (due < stall)
+            due = stall;
+          q.push_back({due, now});
+        }
+        for (size_t i = 0; i < q.size();) {
+          if (q[i].due <= now) {
+            auto p = payload(q[i].ts, 160);
+            jb.put(q[i].ts, false, p.data(), 160);
+            q.erase(q.begin() + i);
+          } else {
+            ++i;
+          }
+        }
+        if (now % 160 == 0 && now > 0) {
+          int16_t buf[160];
+          jb.take(buf, 160);
+          if (now > 16000 * 10)  // after the recenters (every 3 s from 3.5 s)
+            for (int j = 0; j < 160; j += 40) {
+              const long t = which(buf[j], now - 16000, now);
+              if (t >= 0) {
+                sum += static_cast<long>(now) + j - t;
+                ++n;
+              }
+            }
+        }
+      }
+      *recenters = jb.recenters();
+      return n ? sum / static_cast<double>(n) / 16.0 : -1.0;
+    };
+    uint32_t ra, rb, pa, pb;
+    const double a = played_delay_ms(true, 0, &ra), b = played_delay_ms(true, 600, &rb);
+    const double plain_a = played_delay_ms(false, 0, &pa), plain_b = played_delay_ms(false, 600, &pb);
+    std::printf("  played delay: recentered %.1f / %.1f ms, plain %.1f / %.1f ms\n", a, b, plain_a, plain_b);
+    CHECK(plain_b - plain_a > 15.0, "the scenario reproduces the anchor-dependent delay");
+    CHECK(std::fabs(a - b) < 2.0, "recentered: the same delay however the anchor fell");
+    uint32_t rc;
+    const double c = played_delay_ms(true, 6000, &rc);  // a 375 ms stall, as measured on the CoreS3
+    std::printf("  375 ms stall at start: recentered %.1f ms\n", c);
+    CHECK(std::fabs(a - c) < 2.0, "a 375 ms anchor error is corrected in full");
+    CHECK(ra >= 1 && rb >= 1 && ra <= 2 && rb <= 2, "recentered, then left alone once centered");
+    CHECK(pa == 0 && pb == 0, "off by default: the XVF path is unchanged");
+  }
+
   if (failures) {
     std::printf("%d failure(s)\n", failures);
     return 1;

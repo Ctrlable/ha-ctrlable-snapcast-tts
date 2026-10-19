@@ -54,6 +54,34 @@ class Decimator3 {
   int phase_{0};
 };
 
+// Is the speaker making sound, or did it recently? The echo canceller only
+// has work while it is: with nothing playing the mic passes straight through
+// and the CPU stays with the wake word (on the CoreS3 an always-on canceller
+// left micro_wake_word starved, 2026-10-18). `hangover` covers the room's
+// echo tail after the last sound.
+class PlaybackGate {
+ public:
+  PlaybackGate(int16_t threshold, uint32_t hangover) : threshold_(threshold), hangover_(hangover) {}
+
+  // One chunk of the reference; true while the canceller should run.
+  bool feed(const int16_t *ref, size_t n) {
+    bool loud = false;
+    for (size_t i = 0; i < n && !loud; i++)
+      loud = ref[i] > this->threshold_ || ref[i] < -this->threshold_;
+    if (loud) {
+      this->quiet_ = 0;
+    } else if (this->quiet_ < this->hangover_) {
+      this->quiet_ += (uint32_t) n;
+    }
+    return this->quiet_ < this->hangover_;
+  }
+
+ protected:
+  int16_t threshold_;
+  uint32_t hangover_;
+  uint32_t quiet_{0xFFFFFFFFu >> 1};  // starts idle: nothing has played yet
+};
+
 // Stereo 16-bit frames (L, R, L, R, ...) -> one slot.
 inline void pick_slot(const int16_t *stereo, size_t frames, int slot, int16_t *mono) {
   for (size_t i = 0; i < frames; i++)

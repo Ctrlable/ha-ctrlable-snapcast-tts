@@ -356,7 +356,11 @@ void DuplexMicrophone::setup() {
   }
   // Internal stack, unlike the others: with the AFE, its feed() runs the echo
   // cancellers on THIS task, and on a PSRAM stack they ran at ~0.8x real time.
-  if (xTaskCreatePinnedToCore(DuplexMicrophone::rx_task_, "duplex_rx", 8192, this, 10, &this->task_, 0) != pdPASS) {
+  // Either core: pinned to core 0 it shared the CPU with the Wi-Fi driver (23)
+  // and lwIP (18), and its output to the network mic came in bursts with
+  // gaps to ~230 ms (CoreS3, Mic only, 2026-10-18) while pings stayed < 101 ms.
+  if (xTaskCreatePinnedToCore(DuplexMicrophone::rx_task_, "duplex_rx", 8192, this, 10, &this->task_,
+                              tskNO_AFFINITY) != pdPASS) {
     ESP_LOGE(TAG, "microphone: task failed to start");
     this->mark_failed();
   }
@@ -563,6 +567,7 @@ void DuplexMicrophone::run_rx_() {
   int64_t win_start_us = esp_timer_get_time(), feed_us = 0, read_us = 0;
   uint32_t n48 = 0, n_out = 0, clipped = 0;
 
+  int64_t last_emit_us = 0, max_gap_us = 0, gap_window_us = esp_timer_get_time();
   auto emit = [&](const int16_t *s, size_t n) {
     if (this->level_log_) {
       for (size_t i = 0; i < n; i++)
@@ -571,6 +576,17 @@ void DuplexMicrophone::run_rx_() {
     }
     if (n == 0 || !this->running_.load() || this->data_callbacks_.size() == 0)
       return;
+    // Longest wait between two deliveries, logged once a minute: a stall here
+    // reaches a network mic as a gap, however good the Wi-Fi is.
+    const int64_t now_us = esp_timer_get_time();
+    if (last_emit_us != 0 && now_us - last_emit_us > max_gap_us)
+      max_gap_us = now_us - last_emit_us;
+    last_emit_us = now_us;
+    if (now_us - gap_window_us > 60000000LL) {
+      ESP_LOGD(TAG, "delivery: longest gap %u ms in the last minute", (unsigned) (max_gap_us / 1000));
+      max_gap_us = 0;
+      gap_window_us = now_us;
+    }
     const uint8_t *b = reinterpret_cast<const uint8_t *>(s);
     out.assign(b, b + n * 2);
     this->data_callbacks_.call(out);
@@ -651,7 +667,11 @@ void DuplexMicrophone::run_rx_() {
         aec_in[fill] = mic16[i];
         aec_ref[fill] = ref16[i];
         if (++fill == chunk) {
-          if (this->aec_nlp_ < 0) {
+          if (this->aec_gate_ && !this->aec_gate_->feed(aec_ref, chunk)) {
+            // Nothing played for a while: no echo to remove, and the CPU is
+            // the wake word's (aec_only_while_playing).
+            std::memcpy(aec_out, aec_in, chunk * sizeof(int16_t));
+          } else if (this->aec_nlp_ < 0) {
             aec_linear_process(this->aec_, aec_in, aec_ref, aec_out);
           } else {
             aec_process(this->aec_, aec_in, aec_ref, aec_out);
