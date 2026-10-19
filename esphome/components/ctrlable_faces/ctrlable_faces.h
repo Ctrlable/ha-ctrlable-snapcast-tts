@@ -78,6 +78,8 @@ class CtrlableFaces : public Component {
   // that bandwidth starved the two-mic AFE (it kept real time only with the
   // screen off, 2026-10-18).
   void set_frame_scale(uint32_t s) { this->frame_scale_ = s; }
+  // Draw again at once, e.g. after the display was rotated.
+  void redraw() { this->dirty_ = true; }
 
   uint32_t frame_scale_{1};
   void loop() override {

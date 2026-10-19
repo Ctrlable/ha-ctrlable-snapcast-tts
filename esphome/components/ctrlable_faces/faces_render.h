@@ -448,7 +448,9 @@ inline void render(Canvas &c, Style style, Step step, float t, float level, bool
   Pen p(c);
   c.fill(RGB{0, 0, 0});
   float w = c.width(), h = c.height();
-  float u = round ? w / 360 : h / 270;
+  // Scale by the side that limits: a 320x240 screen is 0.89 either way; turned
+  // to 240x320 (screen rotation) the width limits and the face shrinks to fit.
+  float u = round ? w / 360 : std::min(w / 360, h / 270);
   float cx = w / 2, cy = round ? h / 2 - 6 * u : h / 2 - 10 * u;
   float L = level < 0 ? voice(t) : clamp01(level);
   switch (style) {

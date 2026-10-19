@@ -20,8 +20,10 @@ struct Buf : Canvas {
   int width() const override { return w; }
   int height() const override { return h; }
   void fill(RGB c) override { std::fill(px.begin(), px.end(), c); }
+  long off_side = 0;  // lit pixels that fell off the left or right edge
   void put(int x, int y, RGB c) {
     if (x >= 0 && y >= 0 && x < w && y < h) px[y * w + x] = c;
+    else if ((x < 0 || x >= w) && c.r + c.g + c.b > 40) off_side++;
   }
   void disc(int x, int y, int r, RGB c) override {  // same scanline shape as ESPHome's filled_circle
     fills++;
@@ -128,6 +130,19 @@ int main(int argc, char **argv) {
                                   (round ? " round" : " rect") + " (" + std::to_string(bad) + " px)");
       }
   }
+  // Rotated 90 degrees the CoreS3 is 240 wide and 320 tall. Every face must fit
+  // the width as well as it fits the 320x240 landscape it was drawn for: no
+  // more spills off the sides than there, and the label must stay on screen.
+  for (int s = 0; s < 3; s++)
+    for (int st = 0; st < 10; st++)
+      for (float t : {0.3f, 1.3f, 2.6f}) {
+        Buf land(320, 240), port(240, 320);
+        render(land, (Style) s, (Step) st, t, st == LISTENING ? 1.0f : -1, false, true);
+        render(port, (Style) s, (Step) st, t, st == LISTENING ? 1.0f : -1, false, true);
+        check(port.off_side <= land.off_side + 50,
+              std::string("portrait spills off the sides: ") + styles[s] + " " + steps[st] + " (" +
+                  std::to_string(port.off_side) + " px vs " + std::to_string(land.off_side) + " in landscape)");
+      }
   check(frame_interval_ms(MUTED, 5) == 0 && frame_interval_ms(ERROR, 3) == 0, "static steps must not keep redrawing");
   check(frame_interval_ms(IDLE, 1) >= 100, "the resting face must not redraw fast");
   printf("worst frame: %ld fills\n", worst);

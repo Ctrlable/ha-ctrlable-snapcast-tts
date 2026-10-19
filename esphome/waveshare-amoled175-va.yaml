@@ -230,6 +230,10 @@ captive_portal:
 
 logger:
   level: DEBUG
+  logs:
+    # It logs "Setting MADCTL" on EVERY frame: with animated faces that is
+    # tens of lines a second formatted and sent to each log client.
+    display.mipi_spi: INFO
 
 button:
   - platform: factory_reset
@@ -318,6 +322,9 @@ microphone:
     echo_cancellation: true
     aec_mode: sr_high_perf
     aec_nlp: normal
+    # The canceller runs only while the speaker plays: a spoken command (nothing
+    # playing) reaches Assist untouched, and the CPU stays with the wake word.
+    aec_only_while_playing: true
     # Two-mic ESP-SR AFE (front_end: MRM) is implemented but OFF. Only its
     # low-cost mode fits beside the firmware here (high perf: display err 101,
     # TLS fetch failure, task WDT), and low cost removed ~0 dB at the start of
@@ -1035,6 +1042,15 @@ script:
           static const char *const NAMES[] = {"Regular", "Snapcast", "Mic only"};
           ESP_LOGI("mode", "Device mode: %s", NAMES[id(mode_index) % 3]);
           id(answer_speaker).set_passthrough(id(mode_index) == 0);
+          {
+            auto r = id(screen_rotation).active_index().value_or(0);
+            id(lcd).set_rotation((display::DisplayRotation) (r * 90));
+            id(faces).redraw();
+          }
+          {
+            auto a = id(screen_animation).active_index().value_or(0);
+            id(faces).set_frame_scale(a == 0 ? 1 : (a == 1 ? 2 : 0));
+          }
       - if:
           condition:
             lambda: return id(mode_index) == 2;
@@ -1253,6 +1269,44 @@ select:
       - Mic only
     on_value:
       - script.execute: apply_device_mode
+  # Turn the picture in 90-degree steps, for a screen mounted on its side or
+  # upside down. The panel rotates in hardware (MADCTL): no extra CPU or memory.
+  - platform: template
+    name: "Screen rotation"
+    id: screen_rotation
+    icon: mdi:screen-rotation
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "0°"
+    options:
+      - "0°"
+      - "90°"
+      - "180°"
+      - "270°"
+    on_value:
+      - lambda: |-
+          id(lcd).set_rotation((display::DisplayRotation) (i * 90));
+          id(faces).redraw();
+  # How the face moves. Every frame is a full-screen write to PSRAM plus a DMA
+  # read of it; on this board that bandwidth once starved the two-mic AFE, and
+  # the CoreS3 needed static faces beside an echo canceller. Switchable live,
+  # so its effect on what Assist hears can be compared (2026-10-18).
+  - platform: template
+    name: "Screen animation"
+    id: screen_animation
+    icon: mdi:animation-play
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Full
+    options:
+      - Full
+      - Half
+      - Static
+    on_value:
+      - lambda: |-
+          id(faces).set_frame_scale(i == 0 ? 1 : (i == 1 ? 2 : 0));
   - platform: template
     entity_category: config
     name: Wake word engine location
