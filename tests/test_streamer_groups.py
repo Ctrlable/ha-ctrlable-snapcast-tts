@@ -243,3 +243,59 @@ async def test_no_switch_when_announce_stream_id_not_configured():
         await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST)
 
     snap.set_group_stream.assert_not_called()
+
+
+# ── Settle after switching the group (2026-10-18) ─────────────────────────────
+#
+# A wake chime into a group that had to be switched from idle never reached the
+# room: the bus recording held the thinking chime (already-held group) and no
+# trace of the wake chime, with 60 ms or 700 ms of lead-in silence -- the
+# decoder pushes faster than real time, so silence is no wait at all.
+
+
+def _events(snap, sleep, ff):
+    """Order of switch / sleep / push, as one list."""
+    order = []
+    snap.set_group_stream.side_effect = lambda *a: order.append(("switch", a[1]))
+    sleep.side_effect = lambda s: order.append(("sleep", s))
+    ff.side_effect = lambda *a, **k: (order.append(("push", None)), 192000)[1]
+    return order
+
+
+@pytest.mark.asyncio
+async def test_fresh_switch_waits_in_real_time_before_pushing():
+    cs = _make_cs()
+    _setup_state(cs)
+    snap = _mock_snap(current_stream="Annoucements")
+    sleep, ff = AsyncMock(), AsyncMock()
+    order = _events(snap, sleep, ff)
+    with (
+        patch.object(streamer, "get_snap", return_value=snap),
+        patch.object(streamer, "_stream_ffmpeg", new=ff),
+        patch.object(streamer.asyncio, "sleep", new=sleep),
+    ):
+        streamer._locks = {}
+        streamer._sticky.clear()
+        await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST, silence_ms=60)
+    i_switch = order.index(("switch", ANNOUNCE_STREAM))
+    i_push = order.index(("push", None))
+    waited = sum(s for kind, s in order[i_switch:i_push] if kind == "sleep")
+    assert waited >= 0.5, f"pushed {waited:.2f} s after switching; the client is not listening yet: {order}"
+
+
+@pytest.mark.asyncio
+async def test_already_held_group_pushes_at_once():
+    cs = _make_cs()
+    _setup_state(cs)
+    snap = _mock_snap(current_stream=ANNOUNCE_STREAM)
+    sleep, ff = AsyncMock(), AsyncMock()
+    order = _events(snap, sleep, ff)
+    with (
+        patch.object(streamer, "get_snap", return_value=snap),
+        patch.object(streamer, "_stream_ffmpeg", new=ff),
+        patch.object(streamer.asyncio, "sleep", new=sleep),
+    ):
+        streamer._locks = {}
+        streamer._sticky.clear()
+        await streamer.announce(CLIENT_ID, TTS_URL, SOURCE_HOST, silence_ms=60)
+    assert order[0] == ("push", None), f"no switch, so nothing to wait for: {order}"

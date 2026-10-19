@@ -63,6 +63,15 @@ _MAX_PLAYBACK_WAIT = 300.0
 # whole value is being prompt.
 _SILENCE_PADDING_MS = 300
 _CHIME_SILENCE_PADDING_MS = 60
+# A group this announcement has to SWITCH is not listening yet: the client is
+# still re-initialising on the new stream. Lead-in silence cannot cover that --
+# the decoder pushes faster than real time, so 700 ms of silence went out in
+# ~0.1 s -- and a wake chime (0.58 s) into a freshly switched group never
+# reached the room at all (2026-10-18, Living Room bus recording: the thinking
+# chime, which lands on the already-held group, was there; the wake chime was
+# not, with 60 ms or with 700 ms of lead-in). So wait in REAL time after the
+# switch. Only the switching case pays for it.
+_SWITCH_SETTLE_S = 0.6
 _locks: dict[str, asyncio.Lock] = {}
 
 
@@ -587,6 +596,7 @@ async def announce(
                     if grp.stream_id != cs.announce_stream_id:
                         await snap.set_group_stream(cs.announce_group_id, cs.announce_stream_id)
                         needs_restore = True
+                        await asyncio.sleep(_SWITCH_SETTLE_S)
                     elif held:
                         needs_restore = True
                         _LOGGER.info(
